@@ -728,50 +728,65 @@ function PomodoroTimer() {
 
   // Discord shows the Activity as a small tile (about 150px square on a phone) when it's minimised
   // next to the participants' video. The full layout doesn't fit there and would just be cropped,
-  // so the tile gets its own view: mode, ring and time, scaled to whatever space there is.
+  // so the tile gets the top of the full view — mode label and ring, with the same contents and
+  // proportions — scaled down to whatever space there is, and without the controls.
   // (read at render time: the countdown re-renders this several times a second anyway)
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   if (viewport.height < 320 || viewport.width < 260) {
-    const box = Math.max(60, Math.min(viewport.width * 0.9, viewport.height * 0.74));
+    // the full view's sizes in px, times k: a 20px label, a 24px gap, then the 288px ring
+    const k = Math.min((viewport.width * 0.92) / 288, (viewport.height * 0.92) / (20 + 24 + 288));
+    const px = (n) => n * k;
+    const emoji = sessionComplete
+      ? ["🎉"]
+      : isTransitioning
+      ? [mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"]
+      : [].concat(MODES[mode].emoji);
     const caption = sessionComplete
       ? `${completedCycles} completed`
+      : isTransitioning
+      ? mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete"
       : !setupComplete
       ? "Not started"
-      : !isRunning && !isTransitioning
+      : !isRunning
       ? "Paused"
       : centerLabel;
     return (
-      <div
-        className="w-full flex flex-col items-center justify-center bg-white overflow-hidden"
-        style={{ height: "100vh", gap: box * 0.06 }}
-      >
-        <div className="font-bold tracking-wide uppercase" style={{ color, fontSize: Math.max(10, box * 0.11), lineHeight: 1 }}>
+      <div className="w-full flex flex-col items-center justify-center bg-white overflow-hidden" style={{ height: "100vh" }}>
+        <div className="font-bold tracking-wide uppercase" style={{ color, fontSize: px(20), lineHeight: 1 }}>
           {sessionComplete ? "Done" : MODES[mode].label}
         </div>
-        <div className={`relative ${isTransitioning ? "animate-pulse" : ""}`} style={{ width: box, height: box }}>
+        <div
+          className={`relative ${isTransitioning ? "animate-pulse" : ""}`}
+          style={{ width: px(288), height: px(288), marginTop: px(24) }}
+        >
           <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280">
-            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="14" />
+            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="10" />
             {!sessionComplete && secondsLeft > 0 && (
               <circle
-                cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="14"
+                cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="10"
                 strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dashoffset}
                 style={{ transition: "stroke-dashoffset 1s linear" }}
               />
             )}
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <div className="font-bold tabular-nums text-neutral-800" style={{ fontSize: box * 0.24, lineHeight: 1 }}>
-              {sessionComplete
-                ? "🎉"
-                : isTransitioning
-                ? mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"
-                : formatTime(secondsLeft)}
+            <div className="flex items-center justify-center" style={{ gap: px(4), height: px(30), marginBottom: px(12) }}>
+              {emoji.map((e, i) => (
+                <span key={i} style={{ fontSize: px(30), lineHeight: 1 }}>{e}</span>
+              ))}
             </div>
-            {caption && (
-              <div className="text-neutral-400" style={{ fontSize: Math.max(9, box * 0.085), lineHeight: 1, marginTop: box * 0.05 }}>
-                {caption}
+            {!sessionComplete && !isTransitioning && (
+              <div className="font-bold tabular-nums text-neutral-800" style={{ fontSize: px(48), lineHeight: 1 }}>
+                {formatTime(secondsLeft)}
               </div>
             )}
+            {/* the caption is the one thing not scaled all the way down: 14px would become unreadable */}
+            <div
+              className="flex items-center justify-center text-neutral-400"
+              style={{ fontSize: Math.max(8, px(14)), lineHeight: 1, height: px(30), marginTop: px(12) }}
+            >
+              {caption}
+            </div>
           </div>
         </div>
       </div>
