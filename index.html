@@ -37,16 +37,29 @@ let roomId = params.get("room");
 
 if (params.has("frame_id")) {
   try {
-    const { DiscordSDK, patchUrlMappings } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
+    const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
     const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
     await discordSdk.ready(); // tells Discord to hide its loading screen
     window.discordSdk = discordSdk;
     roomId = discordSdk.instanceId;
 
-    // Discord's proxy blocks direct requests to Firebase; this rewrites them to the URL Mapping
-    // /rtdb/{sub} → {sub}.europe-west1.firebasedatabase.app set in the Developer Portal. Must run
-    // before the Firebase script loads, since it grabs the WebSocket constructor at load time.
-    patchUrlMappings([{ prefix: "/.proxy/rtdb/{sub}", target: "{sub}.europe-west1.firebasedatabase.app" }]);
+    // Discord's proxy blocks direct requests to Firebase, so route its WebSocket through the URL
+    // Mapping /rtdb → <database host> set in the Developer Portal. Firebase also hands clients a
+    // per-shard hostname to reconnect to; those all go to the same mapping, since the main host
+    // accepts connections itself (the ns= query parameter names the database). Must run before
+    // the Firebase script loads, since it grabs the WebSocket constructor at load time.
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = class extends NativeWebSocket {
+      constructor(url, protocols) {
+        const u = new URL(url);
+        if (u.hostname.endsWith(".firebasedatabase.app")) {
+          u.host = location.host;
+          u.pathname = "/.proxy/rtdb" + u.pathname;
+          if (!u.searchParams.has("ns")) u.searchParams.set("ns", new URL(FIREBASE_CONFIG.databaseURL).hostname.split(".")[0]);
+        }
+        super(u, protocols);
+      }
+    };
 
     // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
     document.addEventListener("click", (e) => {
