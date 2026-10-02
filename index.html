@@ -877,24 +877,39 @@ function PomodoroTimer() {
               </div>
             )}
           </div>
-          <button
-            onClick={() => {
+          {(() => {
+            const ghostClass = "w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700";
+            const openAddRounds = () => {
               setAddRoundsAmount(originalRoundsChoice ?? 4);
               setAddStartsWithBreak(true);
               setAddRoundsModalOpen(true);
-            }}
-            className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
-            style={{ height: "44px", marginTop: "4px" }}
-          >
-            Add more rounds
-          </button>
-          <button
-            onClick={newSession}
-            className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
-            style={{ height: "44px" }}
-          >
-            Set up new session
-          </button>
+            };
+            // with no rounds done there's nothing to add to — starting afresh is the obvious next
+            // step, so it becomes the primary button
+            return completedCycles === 0 ? (
+              <>
+                <button
+                  onClick={newSession}
+                  className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
+                  style={{ boxShadow: "0 2px 8px -2px #7c3aed59", marginTop: "12px" }}
+                >
+                  Set up new session
+                </button>
+                <button onClick={openAddRounds} className={ghostClass} style={{ height: "44px", marginTop: "4px" }}>
+                  Add more rounds
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={openAddRounds} className={ghostClass} style={{ height: "44px", marginTop: "4px" }}>
+                  Add more rounds
+                </button>
+                <button onClick={newSession} className={ghostClass} style={{ height: "44px" }}>
+                  Set up new session
+                </button>
+              </>
+            );
+          })()}
         </div>
 
         {addRoundsModalOpen && (
@@ -1166,8 +1181,9 @@ function PomodoroTimer() {
           </button>
         </div>
 
-        {mode === "longBreak" ? (
-          <div className="flex flex-col items-center" style={{ marginTop: "24px", gap: "4px" }}>
+        <div className="flex flex-col items-center" style={{ marginTop: "24px", gap: "4px" }}>
+          {mode === "longBreak" ? (
+            <>
             <button
               onClick={switchToShortBreak}
               disabled={isTransitioning}
@@ -1184,17 +1200,26 @@ function PomodoroTimer() {
             >
               Add another 5 min
             </button>
-          </div>
-        ) : (
+            </>
+          ) : (
+            <button
+              onClick={() => startLongBreak()}
+              disabled={isTransitioning}
+              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ height: "44px" }}
+            >
+              {mode === "break" ? "Switch to long break" : "Start long break"}
+            </button>
+          )}
           <button
-            onClick={() => startLongBreak()}
+            onClick={endSession}
             disabled={isTransitioning}
             className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ height: "44px", marginTop: "24px" }}
+            style={{ height: "44px" }}
           >
-            {mode === "break" ? "Switch to long break" : "Start long break"}
+            End session
           </button>
-        )}
+        </div>
 
         <div className="w-full flex flex-col items-center gap-1" style={{ marginTop: "24px" }}>
           <button
@@ -1219,15 +1244,6 @@ function PomodoroTimer() {
 
           {logOpen && history.length > 0 && <HistoryLog history={history} />}
         </div>
-
-        <button
-          onClick={endSession}
-          disabled={isTransitioning}
-          className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ height: "44px", marginTop: "8px" }}
-        >
-          End session
-        </button>
       </div>
       </div>
       <Credit inert={!setupComplete} />
