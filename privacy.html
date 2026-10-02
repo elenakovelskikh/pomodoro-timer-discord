@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Privacy Policy – Violet Tomato</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #262626; background: #fff; line-height: 1.6; margin: 0; }
+  main { max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 0.25rem; }
+  h2 { font-size: 1.125rem; margin: 2rem 0 0.5rem; }
+  p, li { font-size: 1rem; }
+  ul { padding-left: 1.25rem; }
+  .meta { color: #737373; font-size: 0.875rem; margin: 0 0 2rem; }
+  a { color: #7c3aed; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e5e5e5; color: #737373; font-size: 0.875rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>Privacy Policy</h1>
+<p class="meta">Violet Tomato, a Pomodoro timer Activity for Discord · Last updated: October 2, 2026</p>
+
+<p>Violet Tomato ("the Activity") is a shared Pomodoro timer that runs inside Discord voice channels. It is made
+and operated by Elena Kovelskikh, an individual developer. This policy explains what information the Activity
+handles and what it does not.</p>
+
+<h2>The short version</h2>
+<p>The Activity does not ask for your Discord account details, does not use accounts, analytics, advertising or
+tracking cookies, and does not sell or share data for marketing. The only thing it stores is the state of the timer
+you share with the other people in your voice channel.</p>
+
+<h2>Information the Activity does not collect</h2>
+<p>The Activity does not request authorization to your Discord account. It does not receive or store your Discord
+username, user ID, avatar, email address, messages, voice or video.</p>
+
+<h2>Information the Activity stores</h2>
+<p>So that everyone in a voice channel sees the same timer, the timer's state is saved in a database. That state
+consists of:</p>
+<ul>
+  <li>the timer settings chosen for the session (number of rounds, long break length);</li>
+  <li>the current timer status (focus or break, when the current segment started, whether it is paused);</li>
+  <li>the session log: the start and end times of each completed focus round and break;</li>
+  <li>which parts of the shared screen are open (for example, the log or a settings popup).</li>
+</ul>
+<p>This state is stored under a random identifier that Discord assigns to each launch of the Activity. It is not
+linked to any Discord user, and it does not record who pressed which button.</p>
+
+<h2>Service providers</h2>
+<p>The Activity relies on the following services, each of which processes technical data under its own privacy
+policy:</p>
+<ul>
+  <li><strong>Discord</strong> runs the Activity inside its app and routes the Activity's network traffic through
+  its own proxy, so the services below do not see your IP address when you use the Activity in Discord.</li>
+  <li><strong>GitHub Pages</strong> hosts the Activity's files. Like any web host, it may keep standard request
+  logs, which can include technical launch parameters that Discord adds to the address (such as identifiers of the
+  Activity launch and the channel).</li>
+  <li><strong>Google Firebase Realtime Database</strong> (hosted in the European Union, region europe-west1) stores
+  the timer state described above.</li>
+</ul>
+
+<h2>Storage on your device</h2>
+<p>The Activity does not set cookies. The database library it uses may keep a small technical value in your
+browser's local storage to reconnect faster. It contains no personal information.</p>
+
+<h2>How long information is kept</h2>
+<p>Timer state is not deleted automatically when a session ends. It is removed from time to time by the operator
+and can be removed sooner on request. Because it is not linked to any person, a request needs to say roughly when
+and in which server the session took place.</p>
+
+<h2>Children</h2>
+<p>The Activity is available only through Discord and is meant for people who are allowed to use Discord under
+Discord's own age requirements. It does not knowingly collect personal information from anyone.</p>
+
+<h2>Changes to this policy</h2>
+<p>If the Activity starts handling other information (for example, showing participants' names), this policy will
+be updated first and the date at the top will change.</p>
+
+<h2>Contact</h2>
+<p>Questions and requests can be sent by opening an issue at <a href="https://github.com/elenakovelskikh/pomodoro-timer-discord/issues">github.com/elenakovelskikh/pomodoro-timer-discord/issues</a>.</p>
+
+<footer>
+  <a href="terms.html">Terms of Service</a> · <a href="privacy.html">Privacy Policy</a> ·
+  <a href="https://github.com/elenakovelskikh/pomodoro-timer-discord">Source code</a>
+</footer>
+</main>
+</body>
+</html>
