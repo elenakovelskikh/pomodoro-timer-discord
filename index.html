@@ -20,17 +20,33 @@
   // that actually support hovering, matching how a real mouse/trackpad behaves.
   tailwind.config = { future: { hoverOnlyWhenSupported: true } };
 </script>
-<!-- Discord Activity wrapper: runs only when the page is launched inside Discord (it adds frame_id to the URL);
-     on the regular website nothing here loads -->
+<!-- Discord Activity wrapper + shared-state connection. Inside Discord the room is the Activity
+     instance; in a plain browser, open the page with ?room=<name> to test syncing between tabs -->
 <script type="module">
 const DISCORD_CLIENT_ID = "1552028275574964275"; // Developer Portal → OAuth2 → Client ID (public, not a secret)
+// Firebase web config is a public identifier, not a secret; access is limited by the database rules
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCOwTuLww-HLUrNZsJlaEtd-7q4FCGCzoA",
+  databaseURL: "https://violet-tomato-discord-activity-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "violet-tomato-discord-activity",
+  appId: "1:304315009793:web:9de620aa871ef04d0da900",
+};
 
-if (new URLSearchParams(location.search).has("frame_id")) {
+const params = new URLSearchParams(location.search);
+let roomId = params.get("room");
+
+if (params.has("frame_id")) {
   try {
-    const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
+    const { DiscordSDK, patchUrlMappings } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
     const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
     await discordSdk.ready(); // tells Discord to hide its loading screen
     window.discordSdk = discordSdk;
+    roomId = discordSdk.instanceId;
+
+    // Discord's proxy blocks direct requests to Firebase; this rewrites them to the URL Mapping
+    // /rtdb/{sub} → {sub}.europe-west1.firebasedatabase.app set in the Developer Portal. Must run
+    // before the Firebase script loads, since it grabs the WebSocket constructor at load time.
+    patchUrlMappings([{ prefix: "/.proxy/rtdb/{sub}", target: "{sub}.europe-west1.firebasedatabase.app" }]);
 
     // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
     document.addEventListener("click", (e) => {
@@ -41,6 +57,57 @@ if (new URLSearchParams(location.search).has("frame_id")) {
     });
   } catch (err) {
     console.error("Discord SDK init failed:", err);
+  }
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(el);
+  });
+}
+
+// TEMPORARY connectivity check: shows whether the shared database is reachable and how many
+// people are in the room. Replaced by real timer syncing once this is confirmed inside Discord.
+if (roomId) {
+  const badge = document.createElement("div");
+  badge.style.cssText =
+    "position:fixed;top:8px;left:8px;z-index:9999;padding:4px 8px;border-radius:8px;background:#111;color:#fff;font:11px/1.4 ui-monospace,monospace;max-width:90vw";
+  const status = { connected: false, online: 0, offsetMs: null, error: null };
+  const render = () => {
+    badge.textContent = status.error
+      ? `sync error: ${status.error}`
+      : `sync: ${status.connected ? "connected" : "connecting…"} · online ${status.online} · clock offset ${status.offsetMs ?? "?"} ms`;
+  };
+  render();
+  document.body.appendChild(badge);
+
+  try {
+    await loadScript("vendor/firebase-app-compat-12.4.0.js");
+    await loadScript("vendor/firebase-database-compat-12.4.0.js");
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const db = firebase.database();
+    db.INTERNAL.forceWebSockets(); // the long-polling fallback can't get through Discord's proxy
+    const room = db.ref(`rooms/${roomId.replace(/[.#$\[\]\/]/g, "_")}`);
+    const me = room.child("presence").push();
+    const fail = (err) => { status.error = err.message || String(err); render(); };
+
+    db.ref(".info/connected").on("value", (snap) => {
+      status.connected = snap.val() === true;
+      render();
+      if (!status.connected) return;
+      // re-register on every (re)connect, so a dropped connection removes us and a restored one adds us back
+      me.onDisconnect().remove().then(() => me.set(true)).catch(fail);
+    });
+    db.ref(".info/serverTimeOffset").on("value", (snap) => { status.offsetMs = Math.round(snap.val()); render(); });
+    room.child("presence").on("value", (snap) => { status.online = snap.numChildren(); status.error = null; render(); }, fail);
+  } catch (err) {
+    status.error = err.message || String(err);
+    render();
+    console.error("Sync init failed:", err);
   }
 }
 </script>
