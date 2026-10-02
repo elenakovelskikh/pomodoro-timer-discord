@@ -95,12 +95,38 @@ window.timerSyncReady = (async () => {
     firebase.initializeApp(FIREBASE_CONFIG);
     const db = firebase.database();
     db.INTERNAL.forceWebSockets(); // the long-polling fallback can't get through Discord's proxy
-    const stateRef = db.ref(`rooms/${roomId.replace(/[.#$\[\]\/]/g, "_")}/state`);
+    const roomRef = db.ref(`rooms/${roomId.replace(/[.#$\[\]\/]/g, "_")}`);
+    const stateRef = roomRef.child("state");
 
     // Devices' clocks disagree; Firebase reports how far this one is from the server's, so every
     // participant can compute the countdown against the same clock.
     let clockOffsetMs = 0;
     db.ref(".info/serverTimeOffset").on("value", (snap) => { clockOffsetMs = snap.val() || 0; });
+
+    // Delete the room's state once everyone has left, so finished sessions don't pile up in the
+    // database. There's no server to notice an empty room, so the last participant standing asks
+    // the database to remove the state the moment their connection drops, and withdraws that as
+    // soon as someone else joins. (If that last connection only blipped, the timer component puts
+    // its state back when it reconnects.) Best effort: any failure here just leaves the room behind.
+    const presenceRef = roomRef.child("presence");
+    const me = presenceRef.push();
+    let deleteOnLeave = false;
+    db.ref(".info/connected").on("value", (snap) => {
+      if (snap.val() !== true) return;
+      deleteOnLeave = false; // whatever was registered on the previous connection is gone with it
+      me.onDisconnect().remove().then(() => me.set(true)).catch(() => {});
+    });
+    presenceRef.on(
+      "value",
+      (snap) => {
+        const alone = snap.numChildren() === 1 && snap.hasChild(me.key);
+        if (alone === deleteOnLeave) return;
+        deleteOnLeave = alone;
+        const onLeave = stateRef.onDisconnect();
+        (alone ? onLeave.remove() : onLeave.cancel()).catch(() => {});
+      },
+      () => {}
+    );
 
     return {
       now: () => Date.now() + clockOffsetMs,
@@ -358,6 +384,7 @@ const INITIAL_STATE = {
   roundsLimit: null, // null = unlimited (default), number = limit
   setupComplete: false,
   sessionComplete: false,
+  endedEarly: false, // the session was ended with "End session" rather than by reaching the round limit
   completionHeading: "Great job!",
   addRoundsModalOpen: false,
   addRoundsAmount: 4,
@@ -489,7 +516,8 @@ function reduce(s, action, now) {
       if (!s.addRoundsModalOpen) return s;
       let nextMode = "work";
       if (s.addStartsWithBreak) {
-        nextMode = s.completedCycles % CYCLES_BEFORE_LONG_BREAK === 0 && s.longBreakMinutes !== null ? "longBreak" : "break";
+        const longBreakDue = s.completedCycles > 0 && s.completedCycles % CYCLES_BEFORE_LONG_BREAK === 0;
+        nextMode = longBreakDue && s.longBreakMinutes !== null ? "longBreak" : "break";
       }
       const total = (nextMode === "longBreak" ? s.longBreakMinutes : MODES[nextMode].minutes) * 60;
       return {
@@ -497,9 +525,28 @@ function reduce(s, action, now) {
         roundsLimit: s.addRoundsAmount === null ? null : (s.roundsLimit ?? 0) + s.addRoundsAmount,
         addRoundsModalOpen: false,
         sessionComplete: false,
+        endedEarly: false,
         ...freshSegment(nextMode, total, now),
       };
     }
+    case "endSession":
+      // Stops the session where it is and shows the summary. Nothing is erased yet: from the
+      // summary the group can still add rounds and carry on. The unfinished segment isn't logged.
+      if (!s.setupComplete || s.sessionComplete || s.isTransitioning) return s;
+      return {
+        ...s,
+        isRunning: false,
+        pauseStartedAt: s.pauseStartedAt ?? now,
+        sessionComplete: true,
+        endedEarly: true,
+        roundsLimit: s.completedCycles, // so "Add more rounds" adds on top of what was actually done
+        completionHeading:
+          s.completedCycles > 0 ? COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)] : "Session ended",
+      };
+    case "newSession":
+      // back to the setup popup with a clean slate, for everyone
+      if (!s.sessionComplete) return s;
+      return { ...INITIAL_STATE, rev: s.rev };
     case "finishTransition":
       // the sound has finished — start what was lined up
       if (!s.isTransitioning || !s.next) return s;
@@ -584,7 +631,7 @@ function PomodoroTimer() {
   const {
     mode, segmentTotal, isRunning, completedCycles, history, logOpen, summaryLogOpen, isTransitioning,
     preTransitionLabel, longBreakMinutes, roundsLimit, setupComplete, sessionComplete, completionHeading,
-    addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice,
+    addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice, endedEarly,
   } = state;
 
   const secondsLeft = remainingSeconds(state, now());
@@ -602,6 +649,8 @@ function PomodoroTimer() {
   const setAddStartsWithBreak = setter("addStartsWithBreak");
 
   const startSession = () => dispatch({ type: "startSession" });
+  const endSession = () => dispatch({ type: "endSession" });
+  const newSession = () => dispatch({ type: "newSession" });
   const confirmAddRounds = () => dispatch({ type: "confirmAddRounds" });
   const handleToggle = () => dispatch({ type: "toggle" });
   const handleReset = () => dispatch({ type: "reset" });
@@ -737,7 +786,7 @@ function PomodoroTimer() {
     const k = Math.min((viewport.width * 0.92) / 288, (viewport.height * 0.92) / (20 + 24 + 288));
     const px = (n) => n * k;
     const emoji = sessionComplete
-      ? ["🎉"]
+      ? [completedCycles > 0 ? "🎉" : "👋"]
       : isTransitioning
       ? [mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"]
       : [].concat(MODES[mode].emoji);
@@ -799,7 +848,7 @@ function PomodoroTimer() {
         {syncNotice}
         <div className="flex-1 w-full flex items-center justify-center p-6">
         <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-white rounded-2xl border border-neutral-200 p-6 flex flex-col items-center text-center">
-          <div className="text-[30px]">🎉</div>
+          <div className="text-[30px]">{completedCycles > 0 ? "🎉" : "👋"}</div>
           <div className="w-full flex flex-col items-center" style={{ marginTop: "20px" }}>
             <div className="text-xl font-bold text-neutral-800">{completionHeading}</div>
             <button
@@ -809,7 +858,11 @@ function PomodoroTimer() {
               style={{ height: "44px", marginTop: "8px" }}
             >
               <span>
-                {completedCycles === 1 ? "You completed 1 round" : `You completed all ${completedCycles} rounds`}
+                {completedCycles === 0
+                  ? "No rounds completed"
+                  : completedCycles === 1
+                  ? "You completed 1 round"
+                  : `You completed ${endedEarly ? "" : "all "}${completedCycles} rounds`}
               </span>
               {history.length > 0 &&
                 (summaryLogOpen ? (
@@ -834,6 +887,13 @@ function PomodoroTimer() {
             style={{ height: "44px", marginTop: "4px" }}
           >
             Add more rounds
+          </button>
+          <button
+            onClick={newSession}
+            className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
+            style={{ height: "44px" }}
+          >
+            Set up new session
           </button>
         </div>
 
@@ -1159,6 +1219,15 @@ function PomodoroTimer() {
 
           {logOpen && history.length > 0 && <HistoryLog history={history} />}
         </div>
+
+        <button
+          onClick={endSession}
+          disabled={isTransitioning}
+          className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ height: "44px", marginTop: "8px" }}
+        >
+          End session
+        </button>
       </div>
       </div>
       <Credit inert={!setupComplete} />
