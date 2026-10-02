@@ -64,9 +64,10 @@ policy:</p>
 browser's local storage to reconnect faster. It contains no personal information.</p>
 
 <h2>How long information is kept</h2>
-<p>Timer state is not deleted automatically when a session ends. It is removed from time to time by the operator
-and can be removed sooner on request. Because it is not linked to any person, a request needs to say roughly when
-and in which server the session took place.</p>
+<p>Timer state is deleted automatically when the last participant closes the Activity. In rare cases (for example,
+if the last participants leave at exactly the same moment) a session can be left behind; such leftovers are removed
+from time to time by the operator and can be removed sooner on request. Because the state is not linked to any
+person, a request needs to say roughly when and in which server the session took place.</p>
 
 <h2>Children</h2>
 <p>The Activity is available only through Discord and is meant for people who are allowed to use Discord under
