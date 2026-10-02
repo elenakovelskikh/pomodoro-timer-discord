@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Violet Tomato – Automatic Pomodoro Focus Timer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Discord Activity build of the timer; the public website lives in the pomodoro-timer repo -->
+<meta name="robots" content="noindex, nofollow" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🟣%3C/text%3E%3C/svg%3E" />
+<!-- Libraries are vendored (not loaded from CDNs) so the page also works inside a Discord Activity,
+     whose proxy blocks requests to domains that aren't URL-mapped in the Developer Portal -->
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script src="vendor/tailwindcss-3.4.17.js"></script>
+<script>
+  // Without this, tapping a button on a touch device leaves its hover: styles (e.g. the
+  // darker background on the round control buttons) stuck on until something else is tapped,
+  // since there's no mouse to trigger a "leave". This scopes every hover: utility to devices
+  // that actually support hovering, matching how a real mouse/trackpad behaves.
+  tailwind.config = { future: { hoverOnlyWhenSupported: true } };
+</script>
+<!-- Discord Activity wrapper: runs only when the page is launched inside Discord (it adds frame_id to the URL);
+     on the regular website nothing here loads -->
+<script type="module">
+const DISCORD_CLIENT_ID = "1552028275574964275"; // Developer Portal → OAuth2 → Client ID (public, not a secret)
+
+if (new URLSearchParams(location.search).has("frame_id")) {
+  try {
+    const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
+    const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
+    await discordSdk.ready(); // tells Discord to hide its loading screen
+    window.discordSdk = discordSdk;
+
+    // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
+    document.addEventListener("click", (e) => {
+      const link = e.target.closest("a[href^='http']");
+      if (!link) return;
+      e.preventDefault();
+      discordSdk.commands.openExternalLink({ url: link.href });
+    });
+  } catch (err) {
+    console.error("Discord SDK init failed:", err);
+  }
+}
+</script>
+<style>
+  /* Tapping a button on mobile leaves the browser's default focus outline stuck on it until
+     something else is tapped. Keep the outline for real keyboard navigation (:focus-visible),
+     drop it after a touch/mouse click. */
+  button:focus:not(:focus-visible) {
+    outline: none;
+  }
+  /* Keyboard focus ring: leave the browser's own default outline (color/style/width) alone,
+     just push it 2px away from the button so there's a transparent gap first. */
+  button:focus-visible {
+    outline-offset: 2px;
+  }
+</style>
+</head>
+<body>
+<div id="root">
+<noscript>
+<main style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;text-align:center;color:#444">
+<h1>Automatic Pomodoro Focus Timer</h1>
+<p>Start once: 25-minute focus rounds and 5-minute breaks switch automatically, each one is logged and ends with a sound alert. Set a round limit, or let it run without one, and choose whether every 4th round gets a longer break. Free, no sign-up.</p>
+<p>Please enable JavaScript to use the timer.</p>
+</main>
+</noscript>
+</div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const WORK_MIN = 25;
+const BREAK_MIN = 5;
+const LONG_BREAK_MIN = 30;
+const CYCLES_BEFORE_LONG_BREAK = 4;
+
+// null = no long break at all — every 4th round just gets the regular short break instead
+const LONG_BREAK_OPTIONS = [
+  { value: 15, label: "15 min" },
+  { value: 30, label: "30 min" },
+  { value: null, label: "None" },
+];
+
+const START_WITH_OPTIONS = [
+  { value: true, label: "Break" },
+  { value: false, label: "Focus" },
+];
+
+const COMPLETION_HEADINGS = ["Great job!", "Nice work!", "You crushed it!", "Well done!", "Way to go!", "Amazing focus!"];
+
+const MODES = {
+  work: { label: "Focus", minutes: WORK_MIN, color: "#7c3aed", arcColor: "#d1baf6", shadowColor: "#7c3aed", emoji: ["📚", "💻", "✍️"], bg: "#f5f3ff" },
+  break: { label: "Break", minutes: BREAK_MIN, color: "#009AE2", arcColor: "#abdef5", shadowColor: "#006DA1", emoji: "☕", bg: "#f0f9ff" },
+  longBreak: { label: "Long break", minutes: LONG_BREAK_MIN, color: "#009C99", arcColor: "#ABDEDD", shadowColor: "#007371", emoji: "🌴", bg: "#ecfeff" },
+};
+
+function formatTime(s) {
+  const m = Math.floor(s / 60).toString().padStart(2, "0");
+  const sec = (s % 60).toString().padStart(2, "0");
+  return `${m}:${sec}`;
+}
+
+function formatClock(date) {
+  const h = date.getHours().toString().padStart(2, "0");
+  const m = date.getMinutes().toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+const N = { G4:392.00, A4:440.00, C5:523.25, D5:587.33, E5:659.25, G5:783.99, A5:880.00, C6:1046.50, D6:1174.66, E6:1318.51, G6:1567.98 };
+
+function playNotes(notes) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const now = ctx.currentTime;
+  let maxEnd = 0;
+  notes.forEach(({ freq, start, dur, gain = 0.22, type = "sine" }) => {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    const t0 = now + start;
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(gain, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    osc.connect(g);
+    g.connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur);
+    maxEnd = Math.max(maxEnd, start + dur);
+  });
+  setTimeout(() => ctx.close(), (maxEnd + 0.3) * 1000);
+}
+
+const FANFARE_EXTENDED = [
+  { freq: N.G4, start: 0,    dur: 0.2 },
+  { freq: N.C5, start: 0.15, dur: 0.2 },
+  { freq: N.E5, start: 0.30, dur: 0.2 },
+  { freq: N.G5, start: 0.45, dur: 0.2 },
+  { freq: N.C6, start: 0.60, dur: 0.2 },
+  { freq: N.E6, start: 0.75, dur: 0.2 },
+  { freq: N.G6, start: 0.90, dur: 0.25 },
+  { freq: N.C6, start: 1.10, dur: 0.8 },
+];
+
+const PENTATONIC_CLIMB = [
+  { freq: N.C5, start: 0,    dur: 0.22 },
+  { freq: N.D5, start: 0.16, dur: 0.22 },
+  { freq: N.E5, start: 0.32, dur: 0.22 },
+  { freq: N.G5, start: 0.48, dur: 0.22 },
+  { freq: N.A5, start: 0.64, dur: 0.22 },
+  { freq: N.C6, start: 0.80, dur: 0.6 },
+];
+
+function playSound(kind) {
+  // kind: "workEnd" — a focus round just finished, "breakEnd" — a break just finished
+  playNotes(kind === "workEnd" ? FANFARE_EXTENDED : PENTATONIC_CLIMB);
+}
+
+// how long each melody actually plays, used to hold off starting the next round
+const SOUND_DURATION_MS = { workEnd: 1900, breakEnd: 1400 };
+
+function Icon({ children, size = 18, className, style }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+      {children}
+    </svg>
+  );
+}
+const PlayIcon = (props) => <Icon {...props}><polygon points="6 3 20 12 6 21 6 3" /></Icon>;
+const PauseIcon = (props) => <Icon {...props}><rect x="14" y="4" width="4" height="16" rx="1" /><rect x="6" y="4" width="4" height="16" rx="1" /></Icon>;
+const RotateCcwIcon = (props) => <Icon {...props}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></Icon>;
+const SkipForwardIcon = (props) => <Icon {...props}><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" x2="19" y1="5" y2="19" /></Icon>;
+const ChevronDownIcon = (props) => <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
+const ChevronUpIcon = (props) => <Icon {...props}><path d="m18 15-6-6-6 6" /></Icon>;
+const MinusIcon = (props) => <Icon {...props}><line x1="5" y1="12" x2="19" y2="12" /></Icon>;
+const PlusIcon = (props) => <Icon {...props}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></Icon>;
+
+// A proper ARIA radiogroup: one tab stop for the whole group (only the checked option is in the
+// tab order), Left/Up and Right/Down move the checked option and keyboard focus together. Since
+// focus and selection always coincide here, the checked pill's own ring already shows where
+// focus is — no separate focus ring is drawn on top of it.
+function RadioGroup({ label, options, value, onChange, pillClassName }) {
+  function handleKeyDown(e) {
+    const dir = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    const idx = options.findIndex((o) => o.value === value);
+    const nextIdx = (idx + dir + options.length) % options.length;
+    onChange(options[nextIdx].value);
+    e.currentTarget.querySelectorAll('[role="radio"]')[nextIdx]?.focus();
+  }
+
+  return (
+    <div className="w-full flex flex-col items-start gap-2">
+      <div className="text-sm font-medium text-neutral-600">{label}</div>
+      <div role="radiogroup" aria-label={label} onKeyDown={handleKeyDown} className="flex gap-2">
+        {options.map((opt) => {
+          const selected = value === opt.value;
+          return (
+            <button
+              key={String(opt.value)}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(opt.value)}
+              className={`${pillClassName} focus-visible:outline-none ${
+                selected
+                  ? "ring-2 ring-inset ring-violet-500 bg-violet-50 text-violet-700"
+                  : "ring-1 ring-inset ring-neutral-200 text-neutral-500"
+              }`}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function HistoryLog({ history }) {
+  return (
+    <div className="flex flex-col items-start gap-0.5 mt-4 text-left">
+      {history.map((entry, i) => {
+        const label = entry.type === "focus" ? "focus" : entry.type === "break" ? "break" : "long break";
+        return (
+          <div key={i} className="flex text-xs" style={{ color: "#666666" }}>
+            <span className="inline-block" style={{ width: "80px" }}>{label}</span>
+            <span className="font-mono">
+              {formatClock(entry.start)} – {formatClock(entry.end)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Credit({ inert }) {
+  return (
+    <div
+      inert={inert ? "" : undefined}
+      className="w-full flex items-center justify-center gap-1 py-4"
+      style={{ fontSize: "10px", color: "#999999" }}
+    >
+      <span>Made by Elena Kovelskikh</span>
+      <span>·</span>
+      <a href="https://www.linkedin.com/in/kovelskikh/" target="_blank" rel="noopener noreferrer" className="hover:text-neutral-600 underline">
+        LinkedIn
+      </a>
+      <span>·</span>
+      <a href="https://github.com/elenakovelskikh" target="_blank" rel="noopener noreferrer" className="hover:text-neutral-600 underline">
+        GitHub
+      </a>
+    </div>
+  );
+}
+
+function PomodoroTimer() {
+  const [mode, setMode] = useState("work");
+  const [secondsLeft, setSecondsLeft] = useState(WORK_MIN * 60);
+  const [segmentTotal, setSegmentTotal] = useState(WORK_MIN * 60);
+  const [isRunning, setIsRunning] = useState(false);
+  const [completedCycles, setCompletedCycles] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [logOpen, setLogOpen] = useState(false);
+  const [summaryLogOpen, setSummaryLogOpen] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [preTransitionLabel, setPreTransitionLabel] = useState("Pause");
+  const [longBreakMinutes, setLongBreakMinutes] = useState(30);
+  const [roundsLimit, setRoundsLimit] = useState(null); // null = unlimited (default), number = limit
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [sessionComplete, setSessionComplete] = useState(false);
+  const [completionHeading, setCompletionHeading] = useState("Great job!");
+  const [addRoundsModalOpen, setAddRoundsModalOpen] = useState(false);
+  const [addRoundsAmount, setAddRoundsAmount] = useState(4);
+  const [addStartsWithBreak, setAddStartsWithBreak] = useState(true);
+  const [originalRoundsChoice, setOriginalRoundsChoice] = useState(null);
+  const intervalRef = useRef(null);
+  const segmentStartRef = useRef(null);
+  // How long the current segment has spent paused so far, plus when the current pause began
+  // (if any) — segmentStartRef must stay the true wall-clock start for the session log, so the
+  // real-time countdown recompute below subtracts this out instead.
+  const pausedMsRef = useRef(0);
+  const pauseStartedAtRef = useRef(null);
+
+  const totalSeconds = segmentTotal;
+  const progress = 1 - secondsLeft / totalSeconds;
+
+  const logSegment = useCallback(
+    (endedMode, startTime, endTime) => {
+      if (endedMode === "work") {
+        const newCompleted = completedCycles + 1;
+        setCompletedCycles(newCompleted);
+        setHistory((h) => [...h, { type: "focus", round: newCompleted, start: startTime, end: endTime }]);
+      } else {
+        setHistory((h) => [
+          ...h,
+          { type: endedMode === "longBreak" ? "longBreak" : "break", round: completedCycles, start: startTime, end: endTime },
+        ]);
+      }
+    },
+    [completedCycles]
+  );
+
+  // automatic: timer hit zero — play the sound, show the transition animation,
+  // and only start the next round once the sound has actually finished
+  const handleAutoComplete = useCallback((labelOverride) => {
+    const endTime = new Date();
+    const startTime = segmentStartRef.current || endTime;
+    const endedMode = mode;
+    const soundKind = endedMode === "work" ? "workEnd" : "breakEnd";
+    const newCompletedIfWork = completedCycles + 1;
+
+    setPreTransitionLabel(labelOverride ?? "Pause");
+    playSound(soundKind);
+    setIsRunning(false);
+    setIsTransitioning(true);
+    logSegment(endedMode, startTime, endTime);
+    const isLastRound = endedMode === "work" && roundsLimit && newCompletedIfWork >= roundsLimit;
+
+    setTimeout(() => {
+      if (isLastRound) {
+        // the last permitted focus is done — end the session right away, no trailing break
+        setIsTransitioning(false);
+        setCompletionHeading(COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)]);
+        setSessionComplete(true);
+      } else if (endedMode === "work") {
+        const isLongBreak = newCompletedIfWork % CYCLES_BEFORE_LONG_BREAK === 0 && longBreakMinutes !== null;
+        const nextTotal = (isLongBreak ? longBreakMinutes : BREAK_MIN) * 60;
+        setMode(isLongBreak ? "longBreak" : "break");
+        setSecondsLeft(nextTotal);
+        setSegmentTotal(nextTotal);
+        segmentStartRef.current = new Date();
+        pausedMsRef.current = 0;
+        pauseStartedAtRef.current = null;
+        setIsRunning(true);
+        setIsTransitioning(false);
+      } else {
+        setMode("work");
+        setSecondsLeft(WORK_MIN * 60);
+        setSegmentTotal(WORK_MIN * 60);
+        segmentStartRef.current = new Date();
+        pausedMsRef.current = 0;
+        pauseStartedAtRef.current = null;
+        setIsRunning(true);
+        setIsTransitioning(false);
+      }
+    }, SOUND_DURATION_MS[soundKind]);
+  }, [mode, logSegment, completedCycles, longBreakMinutes, roundsLimit]);
+
+  // lets the group cut a 30-min long break short and drop into a fresh 5-min break instead
+  function switchToShortBreak() {
+    const endTime = new Date();
+    const startTime = segmentStartRef.current || endTime;
+    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
+
+    setPreTransitionLabel(label);
+    playSound("breakEnd");
+    setIsRunning(false);
+    setIsTransitioning(true);
+    logSegment("longBreak", startTime, endTime);
+
+    setTimeout(() => {
+      setMode("break");
+      setSecondsLeft(BREAK_MIN * 60);
+      setSegmentTotal(BREAK_MIN * 60);
+      segmentStartRef.current = new Date();
+      pausedMsRef.current = 0;
+      pauseStartedAtRef.current = null;
+      setIsRunning(true);
+      setIsTransitioning(false);
+    }, SOUND_DURATION_MS.breakEnd);
+  }
+
+  // mins lets a one-off long break be started even when the auto-cycle's long break is set to
+  // "None" — it doesn't touch the longBreakMinutes setting, so the 4th-round rule stays as configured
+  function startLongBreak(mins) {
+    // falls back to 30 min when "Long break length" is set to None, so the manual button always works
+    const durationMinutes = mins ?? longBreakMinutes ?? 30;
+    const endTime = new Date();
+    const startTime = segmentStartRef.current || endTime;
+    const endedMode = mode;
+    const soundKind = endedMode === "work" ? "workEnd" : "breakEnd";
+    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
+
+    setPreTransitionLabel(label);
+    playSound(soundKind);
+    setIsRunning(false);
+    setIsTransitioning(true);
+    logSegment(endedMode, startTime, endTime);
+
+    setTimeout(() => {
+      setMode("longBreak");
+      setSecondsLeft(durationMinutes * 60);
+      setSegmentTotal(durationMinutes * 60);
+      segmentStartRef.current = new Date();
+      pausedMsRef.current = 0;
+      pauseStartedAtRef.current = null;
+      setIsRunning(true);
+      setIsTransitioning(false);
+    }, SOUND_DURATION_MS[soundKind]);
+  }
+
+  // lets the group top up the current long break by 5 more minutes — extend the total too,
+  // so the progress ring reflects the new, longer duration instead of appearing to jump backwards
+  function addFiveMinutes() {
+    setSecondsLeft((s) => s + 5 * 60);
+    setSegmentTotal((t) => t + 5 * 60);
+  }
+
+  // Recompute from the real start time (rather than just decrementing by 1 each tick) so a
+  // throttled or fully paused background tab still lands on the correct remaining time —
+  // and completes the round immediately — the moment the phone/tab is looked at again.
+  const syncSecondsLeft = useCallback(() => {
+    const start = segmentStartRef.current;
+    if (!start) return;
+    // still paused right now? count up to this instant instead of leaving a stale pause length
+    const pausedMs = pausedMsRef.current + (pauseStartedAtRef.current ? Date.now() - pauseStartedAtRef.current : 0);
+    const elapsed = Math.floor((Date.now() - start.getTime() - pausedMs) / 1000);
+    const remaining = Math.max(0, segmentTotal - elapsed);
+    setSecondsLeft(remaining);
+    if (remaining <= 0) handleAutoComplete();
+  }, [segmentTotal, handleAutoComplete]);
+
+  useEffect(() => {
+    if (isRunning) {
+      intervalRef.current = setInterval(syncSecondsLeft, 1000);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [isRunning, syncSecondsLeft]);
+
+  // Mobile browsers pause/throttle JS timers while the tab is hidden (backgrounded, screen
+  // locked, another app in front) — there's no way for a web page to keep the countdown
+  // ticking through that, but re-checking the real elapsed time the instant the tab becomes
+  // visible again means it snaps to the correct value (or completes the round) right away
+  // instead of showing a stale number.
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden && isRunning) syncSecondsLeft();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [isRunning, syncSecondsLeft]);
+
+  // Screen Wake Lock: keeps the screen from auto-dimming/locking while a round is running and
+  // the tab is in view. Released automatically by the browser once the tab is hidden, and
+  // there's no API to keep a background tab's screen awake or to override the phone's own
+  // lock button — so this only helps while the timer is actually on screen.
+  useEffect(() => {
+    if (!("wakeLock" in navigator)) return;
+    let wakeLock = null;
+    async function acquire() {
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+      } catch (err) {
+        // often rejects on low battery / when the tab isn't visible — not worth surfacing
+      }
+    }
+    async function onVisible() {
+      if (isRunning && !document.hidden && !wakeLock) await acquire();
+    }
+    if (isRunning) acquire();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      if (wakeLock) wakeLock.release().catch(() => {});
+    };
+  }, [isRunning]);
+
+  useEffect(() => {
+    document.title = isRunning
+      ? `${formatTime(secondsLeft)} — ${MODES[mode].label}`
+      : "Violet Tomato – Automatic Pomodoro Focus Timer";
+  }, [secondsLeft, mode, isRunning]);
+
+  // Lock background scroll while a popup covers the screen — otherwise the page behind it can
+  // still be scrolled (e.g. by touch drag), even though it's inert and visually dimmed.
+  useEffect(() => {
+    const modalOpen = !setupComplete || addRoundsModalOpen;
+    document.documentElement.style.overflow = modalOpen ? "hidden" : "";
+    document.body.style.overflow = modalOpen ? "hidden" : "";
+    return () => {
+      document.documentElement.style.overflow = "";
+      document.body.style.overflow = "";
+    };
+  }, [setupComplete, addRoundsModalOpen]);
+
+  function startSession() {
+    setSetupComplete(true);
+    setOriginalRoundsChoice(roundsLimit);
+    setMode("work");
+    setSecondsLeft(WORK_MIN * 60);
+    setSegmentTotal(WORK_MIN * 60);
+    segmentStartRef.current = new Date();
+    pausedMsRef.current = 0;
+    pauseStartedAtRef.current = null;
+    setIsRunning(true);
+  }
+
+  function confirmAddRounds() {
+    setRoundsLimit(addRoundsAmount === null ? null : (r) => (r ?? 0) + addRoundsAmount);
+    setAddRoundsModalOpen(false);
+    setSessionComplete(false);
+    let nextMode = "work";
+    if (addStartsWithBreak) {
+      nextMode = completedCycles % CYCLES_BEFORE_LONG_BREAK === 0 && longBreakMinutes !== null ? "longBreak" : "break";
+    }
+    const nextTotal = (nextMode === "longBreak" ? longBreakMinutes : MODES[nextMode].minutes) * 60;
+    setMode(nextMode);
+    setSecondsLeft(nextTotal);
+    setSegmentTotal(nextTotal);
+    segmentStartRef.current = new Date();
+    pausedMsRef.current = 0;
+    pauseStartedAtRef.current = null;
+    setIsRunning(true);
+  }
+
+  function handleToggle() {
+    setIsRunning((r) => {
+      const newRunning = !r;
+      if (newRunning) {
+        if (!segmentStartRef.current) {
+          segmentStartRef.current = new Date();
+          pausedMsRef.current = 0;
+          pauseStartedAtRef.current = null;
+        } else if (pauseStartedAtRef.current) {
+          // resuming: fold the just-finished pause into the running total so the real-time
+          // recompute doesn't count it as elapsed segment time
+          pausedMsRef.current += Date.now() - pauseStartedAtRef.current;
+          pauseStartedAtRef.current = null;
+        }
+      } else {
+        pauseStartedAtRef.current = Date.now();
+      }
+      return newRunning;
+    });
+  }
+
+  function handleReset() {
+    const baseTotal = (mode === "longBreak" ? longBreakMinutes : MODES[mode].minutes) * 60;
+    setSecondsLeft(baseTotal);
+    setSegmentTotal(baseTotal);
+    segmentStartRef.current = new Date();
+    pausedMsRef.current = 0;
+    pauseStartedAtRef.current = null;
+    setIsRunning(true);
+  }
+
+  function handleSkip() {
+    // reuse the same sound + transition-delay flow as auto-complete, so it's easy to test
+    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
+    handleAutoComplete(label);
+  }
+
+  const color = MODES[mode].color;
+  const shadowColor = MODES[mode].shadowColor;
+  const arcColor = MODES[mode].arcColor;
+  const radius = 120;
+  const circumference = 2 * Math.PI * radius;
+  // The colored arc is the time remaining: it starts full at 12 o'clock and its moving end
+  // retreats counter-clockwise as the segment runs.
+  const dashoffset = circumference * progress;
+  const tipDeg = (1 - progress) * 360;
+  // Soft round shadow cast by the moving end onto whatever lies just clockwise of it — the gray
+  // track mid-segment, or the fixed end of the arc itself right at the start. It's a blurred disc
+  // nudged ahead of the cap, so the part peeking out from under the cap is crescent-shaped.
+  const shadowDeg = 1.5;
+  const shadowCenter = {
+    x: 140 + radius * Math.cos((shadowDeg * Math.PI) / 180),
+    y: 140 + radius * Math.sin((shadowDeg * Math.PI) / 180),
+  };
+
+  const centerLabel = mode === "work" ? `Round ${completedCycles + 1}` : "";
+
+  if (sessionComplete) {
+    return (
+      <div className="min-h-screen w-full flex flex-col bg-white">
+        <div className="flex-1 w-full flex items-center justify-center p-6">
+        <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-white rounded-2xl border border-neutral-200 p-6 flex flex-col items-center text-center">
+          <div className="text-[30px]">🎉</div>
+          <div className="w-full flex flex-col items-center" style={{ marginTop: "20px" }}>
+            <div className="text-xl font-bold text-neutral-800">{completionHeading}</div>
+            <button
+              onClick={() => setSummaryLogOpen((o) => !o)}
+              disabled={history.length === 0}
+              className="w-full flex items-center justify-center gap-1 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:hover:text-neutral-500 disabled:cursor-default"
+              style={{ height: "44px", marginTop: "8px" }}
+            >
+              <span>
+                {completedCycles === 1 ? "You completed 1 round" : `You completed all ${completedCycles} rounds`}
+              </span>
+              {history.length > 0 &&
+                (summaryLogOpen ? (
+                  <ChevronUpIcon size={16} style={{ color: "#808080" }} />
+                ) : (
+                  <ChevronDownIcon size={16} style={{ color: "#808080" }} />
+                ))}
+            </button>
+            {summaryLogOpen && history.length > 0 && (
+              <div style={{ marginBottom: "12px" }}>
+                <HistoryLog history={history} />
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => {
+              setAddRoundsAmount(originalRoundsChoice ?? 4);
+              setAddStartsWithBreak(true);
+              setAddRoundsModalOpen(true);
+            }}
+            className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
+            style={{ height: "44px", marginTop: "4px" }}
+          >
+            Add more rounds
+          </button>
+        </div>
+
+        {addRoundsModalOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-6"
+            style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+          >
+            <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
+              <div className="w-full flex flex-col items-start gap-2">
+                <div className="text-sm font-medium text-neutral-600">How many more rounds?</div>
+                <div className="flex items-stretch rounded-xl border border-neutral-200">
+                  <button
+                    onClick={() => setAddRoundsAmount((n) => (n === null ? null : n === 1 ? null : n - 1))}
+                    disabled={addRoundsAmount === null}
+                    className="w-11 h-11 flex items-center justify-center rounded-l-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
+                  >
+                    <MinusIcon size={20} />
+                  </button>
+                  <span className="w-24 flex items-center justify-center border-x border-neutral-200">
+                    <span className="flex items-baseline gap-1.5 tabular-nums">
+                      <span className="text-xl font-bold text-neutral-800 leading-none">{addRoundsAmount === null ? "∞" : addRoundsAmount}</span>
+                      {addRoundsAmount !== null && (
+                        <span className="text-sm text-neutral-800 leading-none">{addRoundsAmount === 1 ? "round" : "rounds"}</span>
+                      )}
+                    </span>
+                  </span>
+                  <button
+                    onClick={() => setAddRoundsAmount((n) => (n === null ? 1 : Math.min(16, n + 1)))}
+                    disabled={addRoundsAmount === 16}
+                    className="w-11 h-11 flex items-center justify-center rounded-r-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
+                  >
+                    <PlusIcon size={20} />
+                  </button>
+                </div>
+              </div>
+              <RadioGroup
+                label="Start with"
+                options={START_WITH_OPTIONS}
+                value={addStartsWithBreak}
+                onChange={setAddStartsWithBreak}
+                pillClassName="px-6 py-3 rounded-xl text-sm font-medium"
+              />
+              <RadioGroup
+                label="Long break length"
+                options={LONG_BREAK_OPTIONS}
+                value={longBreakMinutes}
+                onChange={setLongBreakMinutes}
+                pillClassName="px-4 py-3 rounded-xl text-sm font-medium whitespace-nowrap"
+              />
+              <div className="w-full flex flex-col items-center gap-1">
+                <button
+                  onClick={confirmAddRounds}
+                  className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
+                  style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
+                >
+                  {addRoundsAmount === null
+                    ? "Continue without a limit"
+                    : addRoundsAmount === 1
+                    ? "Add 1 round"
+                    : `Add ${addRoundsAmount} rounds`}
+                </button>
+                <button
+                  onClick={() => setAddRoundsModalOpen(false)}
+                  className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
+                  style={{ height: "44px" }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        </div>
+        <Credit inert={addRoundsModalOpen} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen w-full flex flex-col bg-white">
+      <div className="flex-1 w-full flex items-start justify-center p-6 pt-16">
+      {!setupComplete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-6"
+          style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+        >
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
+            <div className="w-full text-left">
+              <div className="text-xl font-bold text-neutral-800">Automatic Pomodoro Focus Timer</div>
+              <div className="text-sm text-neutral-400 mt-3">
+                Start once: 25&#8209;minute focus rounds and 5&#8209;minute breaks switch automatically, each
+                one is logged and ends with a sound alert. Every 4th round gets an optional longer break.
+              </div>
+            </div>
+
+            <div className="w-full flex flex-col items-start gap-2">
+              <div className="text-sm font-medium text-neutral-600">Number of rounds</div>
+              <div className="flex items-stretch rounded-xl border border-neutral-200">
+                <button
+                  onClick={() => setRoundsLimit((r) => (r === null ? null : r === 1 ? null : r - 1))}
+                  disabled={roundsLimit === null}
+                  className="w-11 h-11 flex items-center justify-center rounded-l-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
+                >
+                  <MinusIcon size={20} />
+                </button>
+                <span className="w-24 flex items-center justify-center border-x border-neutral-200">
+                  <span className="flex items-baseline gap-1.5 tabular-nums">
+                    <span className="text-xl font-bold text-neutral-800 leading-none">{roundsLimit === null ? "∞" : roundsLimit}</span>
+                    {roundsLimit !== null && (
+                      <span className="text-sm text-neutral-800 leading-none">{roundsLimit === 1 ? "round" : "rounds"}</span>
+                    )}
+                  </span>
+                </span>
+                <button
+                  onClick={() => setRoundsLimit((r) => (r === null ? 1 : Math.min(16, r + 1)))}
+                  disabled={roundsLimit === 16}
+                  className="w-11 h-11 flex items-center justify-center rounded-r-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
+                >
+                  <PlusIcon size={20} />
+                </button>
+              </div>
+            </div>
+
+            <RadioGroup
+              label="Long break length"
+              options={LONG_BREAK_OPTIONS}
+              value={longBreakMinutes}
+              onChange={setLongBreakMinutes}
+              pillClassName="px-4 py-3 rounded-xl text-sm font-medium whitespace-nowrap"
+            />
+
+            <button
+              onClick={startSession}
+              className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
+              style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
+            >
+              Start
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div inert={!setupComplete ? "" : undefined} className="w-full max-w-sm flex flex-col items-center">
+        <div className="text-xl font-bold tracking-wide uppercase" style={{ color }}>
+          {MODES[mode].label}
+        </div>
+
+        <div className={`relative w-72 h-72 ${isTransitioning ? "animate-pulse" : ""}`} style={{ marginTop: "24px" }}>
+          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280">
+            <defs>
+              <radialGradient id="ring-tip-shadow">
+                <stop offset="0%" stopColor={shadowColor} stopOpacity="0.25" />
+                <stop offset="45%" stopColor={shadowColor} stopOpacity="0.07" />
+                <stop offset="100%" stopColor={shadowColor} stopOpacity="0" />
+              </radialGradient>
+              {/* keeps the shadow inside the ring's band */}
+              <clipPath id="ring-band">
+                <path
+                  clipRule="evenodd"
+                  d={`M 140 ${140 - radius - 5} a ${radius + 5} ${radius + 5} 0 1 0 0.01 0 Z
+                      M 140 ${140 - radius + 5} a ${radius - 5} ${radius - 5} 0 1 0 0.01 0 Z`}
+                />
+              </clipPath>
+            </defs>
+            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="10" />
+            <circle
+              cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="10"
+              strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dashoffset}
+              style={{ transition: "stroke-dashoffset 1s linear" }}
+            />
+            {/* Moving end: shadow patch plus a cap drawn on top of it, rotated as one piece so it
+                tracks the arc with the same 1s linear easing. */}
+            <g
+              style={{
+                transform: `rotate(${tipDeg}deg)`,
+                transformOrigin: "140px 140px",
+                transition: "transform 1s linear",
+                display: secondsLeft > 0 ? undefined : "none",
+              }}
+            >
+              <circle
+                cx={shadowCenter.x} cy={shadowCenter.y} r="8"
+                fill="url(#ring-tip-shadow)" clipPath="url(#ring-band)"
+              />
+              <circle cx={140 + radius} cy="140" r="5" fill={arcColor} />
+            </g>
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            {isTransitioning ? (
+              <>
+                <div style={{ fontSize: "30px", lineHeight: "34px" }}>{mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"}</div>
+                <div className="text-sm text-neutral-400 mt-1">
+                  {mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete"}
+                </div>
+              </>
+            ) : (
+              <>
+                <div
+                  className="flex items-center justify-center gap-1"
+                  style={{ height: "30px", marginBottom: "12px" }}
+                >
+                  {Array.isArray(MODES[mode].emoji) ? (
+                    MODES[mode].emoji.map((e, i) => (
+                      <span key={i} style={{ fontSize: "30px", lineHeight: "30px" }}>{e}</span>
+                    ))
+                  ) : (
+                    <span style={{ fontSize: "30px", lineHeight: "30px" }}>{MODES[mode].emoji}</span>
+                  )}
+                </div>
+                <div className="text-5xl font-bold tabular-nums text-neutral-800">{formatTime(secondsLeft)}</div>
+                <div
+                  className="flex items-center justify-center text-sm text-neutral-400"
+                  style={{ height: "30px", marginTop: "12px" }}
+                >
+                  {mode === "work" ? centerLabel : ""}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-5" style={{ marginTop: "24px" }}>
+          <button
+            onClick={handleReset}
+            disabled={isTransitioning}
+            className="flex items-center justify-center rounded-full bg-neutral-200 text-neutral-600 hover:bg-neutral-300 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ height: "44px", width: "44px" }}
+            title="Reset current round"
+          >
+            <RotateCcwIcon size={20} />
+          </button>
+          {(() => {
+            const buttonLabel = isTransitioning
+              ? preTransitionLabel
+              : isRunning
+              ? "Pause"
+              : secondsLeft === totalSeconds
+              ? "Start"
+              : "Resume";
+            const looksActive = buttonLabel === "Pause";
+            return (
+              <button
+                onClick={handleToggle}
+                disabled={isTransitioning}
+                aria-label={buttonLabel}
+                title={buttonLabel}
+                className={`flex items-center justify-center rounded-full disabled:opacity-40 disabled:cursor-not-allowed ${
+                  looksActive ? "bg-neutral-200 text-neutral-600 hover:bg-neutral-300" : "text-white"
+                }`}
+                style={{
+                  height: "56px",
+                  width: "56px",
+                  ...(looksActive ? {} : { backgroundColor: color, boxShadow: `0 2px 8px -2px ${shadowColor}59` }),
+                }}
+              >
+                {looksActive ? <PauseIcon size={20} /> : <PlayIcon size={20} />}
+              </button>
+            );
+          })()}
+          <button
+            onClick={handleSkip}
+            disabled={isTransitioning}
+            className="flex items-center justify-center rounded-full bg-neutral-200 text-neutral-600 hover:bg-neutral-300 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ height: "44px", width: "44px" }}
+            title="Skip"
+          >
+            <SkipForwardIcon size={20} />
+          </button>
+        </div>
+
+        {mode === "longBreak" ? (
+          <div className="flex flex-col items-center" style={{ marginTop: "24px", gap: "4px" }}>
+            <button
+              onClick={switchToShortBreak}
+              disabled={isTransitioning}
+              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ height: "44px" }}
+            >
+              Switch to 5 min break
+            </button>
+            <button
+              onClick={addFiveMinutes}
+              disabled={isTransitioning}
+              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ height: "44px" }}
+            >
+              Add another 5 min
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => startLongBreak()}
+            disabled={isTransitioning}
+            className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ height: "44px", marginTop: "24px" }}
+          >
+            {mode === "break" ? "Switch to long break" : "Start long break"}
+          </button>
+        )}
+
+        <div className="w-full flex flex-col items-center gap-1" style={{ marginTop: "24px" }}>
+          <button
+            onClick={() => setLogOpen((o) => !o)}
+            className="flex items-center"
+            style={{ minHeight: "44px" }}
+          >
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-xl font-bold text-neutral-900 leading-none">{completedCycles}</span>
+              <span className="text-sm text-neutral-900 leading-none">completed</span>
+              {completedCycles > 0 && (
+                <span className="self-end py-px">
+                  {logOpen ? (
+                    <ChevronUpIcon size={16} style={{ color: "#808080" }} />
+                  ) : (
+                    <ChevronDownIcon size={16} style={{ color: "#808080" }} />
+                  )}
+                </span>
+              )}
+            </span>
+          </button>
+
+          {logOpen && history.length > 0 && <HistoryLog history={history} />}
+        </div>
+      </div>
+      </div>
+      <Credit inert={!setupComplete} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PomodoroTimer />);
+</script>
+</body>
+</html>
