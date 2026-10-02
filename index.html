@@ -621,9 +621,11 @@ function PomodoroTimer() {
       if (!document.hidden) tick();
     };
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("resize", tick); // the layout below depends on the window size
     return () => {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("resize", tick);
     };
   }, []);
 
@@ -723,6 +725,58 @@ function PomodoroTimer() {
   };
 
   const centerLabel = mode === "work" ? `Round ${completedCycles + 1}` : "";
+
+  // Discord shows the Activity as a small tile (about 150px square on a phone) when it's minimised
+  // next to the participants' video. The full layout doesn't fit there and would just be cropped,
+  // so the tile gets its own view: mode, ring and time, scaled to whatever space there is.
+  // (read at render time: the countdown re-renders this several times a second anyway)
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  if (viewport.height < 320 || viewport.width < 260) {
+    const box = Math.max(60, Math.min(viewport.width * 0.9, viewport.height * 0.74));
+    const caption = sessionComplete
+      ? `${completedCycles} completed`
+      : !setupComplete
+      ? "Not started"
+      : !isRunning && !isTransitioning
+      ? "Paused"
+      : centerLabel;
+    return (
+      <div
+        className="w-full flex flex-col items-center justify-center bg-white overflow-hidden"
+        style={{ height: "100vh", gap: box * 0.06 }}
+      >
+        <div className="font-bold tracking-wide uppercase" style={{ color, fontSize: Math.max(10, box * 0.11), lineHeight: 1 }}>
+          {sessionComplete ? "Done" : MODES[mode].label}
+        </div>
+        <div className={`relative ${isTransitioning ? "animate-pulse" : ""}`} style={{ width: box, height: box }}>
+          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280">
+            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="14" />
+            {!sessionComplete && secondsLeft > 0 && (
+              <circle
+                cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="14"
+                strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dashoffset}
+                style={{ transition: "stroke-dashoffset 1s linear" }}
+              />
+            )}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className="font-bold tabular-nums text-neutral-800" style={{ fontSize: box * 0.24, lineHeight: 1 }}>
+              {sessionComplete
+                ? "🎉"
+                : isTransitioning
+                ? mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"
+                : formatTime(secondsLeft)}
+            </div>
+            {caption && (
+              <div className="text-neutral-400" style={{ fontSize: Math.max(9, box * 0.085), lineHeight: 1, marginTop: box * 0.05 }}>
+                {caption}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (sessionComplete) {
     return (
