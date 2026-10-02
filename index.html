@@ -20,8 +20,9 @@
   // that actually support hovering, matching how a real mouse/trackpad behaves.
   tailwind.config = { future: { hoverOnlyWhenSupported: true } };
 </script>
-<!-- Discord Activity wrapper + shared-state connection. Inside Discord the room is the Activity
-     instance; in a plain browser, open the page with ?room=<name> to test syncing between tabs -->
+<!-- Discord Activity wrapper + shared timer state. Inside Discord the room is the Activity instance,
+     so everyone in the voice channel sees one timer; in a plain browser, open the page with
+     ?room=<name> to test syncing between tabs. Without a room the timer runs standalone. -->
 <script type="module">
 const DISCORD_CLIENT_ID = "1552028275574964275"; // Developer Portal → OAuth2 → Client ID (public, not a secret)
 // Firebase web config is a public identifier, not a secret; access is limited by the database rules
@@ -31,47 +32,6 @@ const FIREBASE_CONFIG = {
   projectId: "violet-tomato-discord-activity",
   appId: "1:304315009793:web:9de620aa871ef04d0da900",
 };
-
-const params = new URLSearchParams(location.search);
-let roomId = params.get("room");
-
-if (params.has("frame_id")) {
-  try {
-    const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
-    const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
-    await discordSdk.ready(); // tells Discord to hide its loading screen
-    window.discordSdk = discordSdk;
-    roomId = discordSdk.instanceId;
-
-    // Discord's proxy blocks direct requests to Firebase, so route its WebSocket through the URL
-    // Mapping /rtdb → <database host> set in the Developer Portal. Firebase also hands clients a
-    // per-shard hostname to reconnect to; those all go to the same mapping, since the main host
-    // accepts connections itself (the ns= query parameter names the database). Must run before
-    // the Firebase script loads, since it grabs the WebSocket constructor at load time.
-    const NativeWebSocket = window.WebSocket;
-    window.WebSocket = class extends NativeWebSocket {
-      constructor(url, protocols) {
-        const u = new URL(url);
-        if (u.hostname.endsWith(".firebasedatabase.app")) {
-          u.host = location.host;
-          u.pathname = "/.proxy/rtdb" + u.pathname;
-          if (!u.searchParams.has("ns")) u.searchParams.set("ns", new URL(FIREBASE_CONFIG.databaseURL).hostname.split(".")[0]);
-        }
-        super(u, protocols);
-      }
-    };
-
-    // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
-    document.addEventListener("click", (e) => {
-      const link = e.target.closest("a[href^='http']");
-      if (!link) return;
-      e.preventDefault();
-      discordSdk.commands.openExternalLink({ url: link.href });
-    });
-  } catch (err) {
-    console.error("Discord SDK init failed:", err);
-  }
-}
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -83,20 +43,51 @@ function loadScript(src) {
   });
 }
 
-// TEMPORARY connectivity check: shows whether the shared database is reachable and how many
-// people are in the room. Replaced by real timer syncing once this is confirmed inside Discord.
-if (roomId) {
-  const badge = document.createElement("div");
-  badge.style.cssText =
-    "position:fixed;top:8px;left:8px;z-index:9999;padding:4px 8px;border-radius:8px;background:#111;color:#fff;font:11px/1.4 ui-monospace,monospace;max-width:90vw";
-  const status = { connected: false, online: 0, offsetMs: null, error: null };
-  const render = () => {
-    badge.textContent = status.error
-      ? `sync error: ${status.error}`
-      : `sync: ${status.connected ? "connected" : "connecting…"} · online ${status.online} · clock offset ${status.offsetMs ?? "?"} ms`;
-  };
-  render();
-  document.body.appendChild(badge);
+// Resolves to the sync API the timer component uses, or null when there's no room to sync with.
+// Assigned synchronously so it exists before the timer component mounts.
+window.timerSyncReady = (async () => {
+  const params = new URLSearchParams(location.search);
+  let roomId = params.get("room");
+
+  if (params.has("frame_id")) {
+    try {
+      const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
+      const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
+      await discordSdk.ready(); // tells Discord to hide its loading screen
+      window.discordSdk = discordSdk;
+      roomId = discordSdk.instanceId;
+
+      // Discord's proxy blocks direct requests to Firebase, so route its WebSocket through the URL
+      // Mapping /rtdb → <database host> set in the Developer Portal. Firebase also hands clients a
+      // per-shard hostname to reconnect to; those all go to the same mapping, since the main host
+      // accepts connections itself (the ns= query parameter names the database). Must run before
+      // the Firebase script loads, since it grabs the WebSocket constructor at load time.
+      const NativeWebSocket = window.WebSocket;
+      window.WebSocket = class extends NativeWebSocket {
+        constructor(url, protocols) {
+          const u = new URL(url);
+          if (u.hostname.endsWith(".firebasedatabase.app")) {
+            u.host = location.host;
+            u.pathname = "/.proxy/rtdb" + u.pathname;
+            if (!u.searchParams.has("ns")) u.searchParams.set("ns", new URL(FIREBASE_CONFIG.databaseURL).hostname.split(".")[0]);
+          }
+          super(u, protocols);
+        }
+      };
+
+      // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
+      document.addEventListener("click", (e) => {
+        const link = e.target.closest("a[href^='http']");
+        if (!link) return;
+        e.preventDefault();
+        discordSdk.commands.openExternalLink({ url: link.href });
+      });
+    } catch (err) {
+      console.error("Discord SDK init failed:", err);
+    }
+  }
+
+  if (!roomId) return null;
 
   try {
     await loadScript("vendor/firebase-app-compat-12.4.0.js");
@@ -104,25 +95,36 @@ if (roomId) {
     firebase.initializeApp(FIREBASE_CONFIG);
     const db = firebase.database();
     db.INTERNAL.forceWebSockets(); // the long-polling fallback can't get through Discord's proxy
-    const room = db.ref(`rooms/${roomId.replace(/[.#$\[\]\/]/g, "_")}`);
-    const me = room.child("presence").push();
-    const fail = (err) => { status.error = err.message || String(err); render(); };
+    const stateRef = db.ref(`rooms/${roomId.replace(/[.#$\[\]\/]/g, "_")}/state`);
 
-    db.ref(".info/connected").on("value", (snap) => {
-      status.connected = snap.val() === true;
-      render();
-      if (!status.connected) return;
-      // re-register on every (re)connect, so a dropped connection removes us and a restored one adds us back
-      me.onDisconnect().remove().then(() => me.set(true)).catch(fail);
-    });
-    db.ref(".info/serverTimeOffset").on("value", (snap) => { status.offsetMs = Math.round(snap.val()); render(); });
-    room.child("presence").on("value", (snap) => { status.online = snap.numChildren(); status.error = null; render(); }, fail);
+    // Devices' clocks disagree; Firebase reports how far this one is from the server's, so every
+    // participant can compute the countdown against the same clock.
+    let clockOffsetMs = 0;
+    db.ref(".info/serverTimeOffset").on("value", (snap) => { clockOffsetMs = snap.val() || 0; });
+
+    return {
+      now: () => Date.now() + clockOffsetMs,
+      // onState gets { rev, json } (or null for a brand-new room) now and after every change —
+      // including this client's own writes, and the winning write when one of ours loses a race.
+      subscribe(onState, onConnected, onError) {
+        stateRef.on("value", (snap) => onState(snap.val()), onError);
+        db.ref(".info/connected").on("value", (snap) => onConnected(snap.val() === true));
+      },
+      // Writes only if nobody else changed the room since baseRev; otherwise the write is dropped
+      // and subscribe() delivers the state that got there first.
+      publish(baseRev, next) {
+        const value = { rev: next.rev, json: JSON.stringify(next) };
+        stateRef
+          .transaction((cur) => ((cur ? cur.rev : 0) === baseRev ? value : undefined))
+          .catch((err) => console.error("Sync write failed:", err));
+      },
+    };
   } catch (err) {
-    status.error = err.message || String(err);
-    render();
     console.error("Sync init failed:", err);
+    window.timerSyncFailed = true;
+    return null;
   }
-}
+})();
 </script>
 <style>
   /* Tapping a button on mobile leaves the browser's default focus outline stuck on it until
@@ -309,7 +311,7 @@ function HistoryLog({ history }) {
           <div key={i} className="flex text-xs" style={{ color: "#666666" }}>
             <span className="inline-block" style={{ width: "80px" }}>{label}</span>
             <span className="font-mono">
-              {formatClock(entry.start)} – {formatClock(entry.end)}
+              {formatClock(new Date(entry.start))} – {formatClock(new Date(entry.end))}
             </span>
           </div>
         );
@@ -338,194 +340,314 @@ function Credit({ inert }) {
   );
 }
 
-function PomodoroTimer() {
-  const [mode, setMode] = useState("work");
-  const [secondsLeft, setSecondsLeft] = useState(WORK_MIN * 60);
-  const [segmentTotal, setSegmentTotal] = useState(WORK_MIN * 60);
-  const [isRunning, setIsRunning] = useState(false);
-  const [completedCycles, setCompletedCycles] = useState(0);
-  const [history, setHistory] = useState([]);
-  const [logOpen, setLogOpen] = useState(false);
-  const [summaryLogOpen, setSummaryLogOpen] = useState(false);
-  const [isTransitioning, setIsTransitioning] = useState(false);
-  const [preTransitionLabel, setPreTransitionLabel] = useState("Pause");
-  const [longBreakMinutes, setLongBreakMinutes] = useState(30);
-  const [roundsLimit, setRoundsLimit] = useState(null); // null = unlimited (default), number = limit
-  const [setupComplete, setSetupComplete] = useState(false);
-  const [sessionComplete, setSessionComplete] = useState(false);
-  const [completionHeading, setCompletionHeading] = useState("Great job!");
-  const [addRoundsModalOpen, setAddRoundsModalOpen] = useState(false);
-  const [addRoundsAmount, setAddRoundsAmount] = useState(4);
-  const [addStartsWithBreak, setAddStartsWithBreak] = useState(true);
-  const [originalRoundsChoice, setOriginalRoundsChoice] = useState(null);
-  const intervalRef = useRef(null);
-  const segmentStartRef = useRef(null);
-  // How long the current segment has spent paused so far, plus when the current pause began
-  // (if any) — segmentStartRef must stay the true wall-clock start for the session log, so the
-  // real-time countdown recompute below subtracts this out instead.
-  const pausedMsRef = useRef(0);
-  const pauseStartedAtRef = useRef(null);
+// Everything about the session lives in this one object so it can be shared as-is: whatever one
+// participant does — including opening the log or a popup — shows up for everyone in the room.
+// Times are timestamps (ms) on the shared clock, never Date objects, so the state survives JSON.
+const INITIAL_STATE = {
+  rev: 0, // bumped on every change; lets two people changing the room at once be told apart
+  mode: "work",
+  segmentTotal: WORK_MIN * 60,
+  isRunning: false,
+  completedCycles: 0,
+  history: [],
+  logOpen: false,
+  summaryLogOpen: false,
+  isTransitioning: false,
+  preTransitionLabel: "Pause",
+  longBreakMinutes: 30,
+  roundsLimit: null, // null = unlimited (default), number = limit
+  setupComplete: false,
+  sessionComplete: false,
+  completionHeading: "Great job!",
+  addRoundsModalOpen: false,
+  addRoundsAmount: 4,
+  addStartsWithBreak: true,
+  originalRoundsChoice: null,
+  // The countdown isn't stored — it's derived from when the segment really started, minus the
+  // time spent paused (pausedMs so far, plus the pause in progress since pauseStartedAt, if any).
+  // segmentStart must stay the true start for the session log.
+  segmentStart: null,
+  pausedMs: 0,
+  pauseStartedAt: null,
+  // While the end-of-segment sound plays: what comes after it, and when ({ mode, total, at } or
+  // { complete, heading, at }). Stored rather than held in a timeout so any participant can finish
+  // the transition, even if the one who triggered it has left.
+  next: null,
+};
 
+// Recomputed from the real start time (rather than decremented once a second) so a throttled or
+// fully paused background tab still lands on the correct remaining time the moment it's looked at
+// again — and so every participant shows the same number.
+function remainingSeconds(s, now) {
+  if (s.segmentStart == null) return s.segmentTotal;
+  const pausedMs = s.pausedMs + (s.pauseStartedAt != null ? now - s.pauseStartedAt : 0);
+  const elapsed = Math.floor((now - s.segmentStart - pausedMs) / 1000);
+  return Math.max(0, Math.min(s.segmentTotal, s.segmentTotal - elapsed));
+}
+
+function toggleLabel(s, now) {
+  return s.isRunning ? "Pause" : remainingSeconds(s, now) === s.segmentTotal ? "Start" : "Resume";
+}
+
+function freshSegment(mode, total, now) {
+  return { mode, segmentTotal: total, segmentStart: now, pausedMs: 0, pauseStartedAt: null, isRunning: true };
+}
+
+// Ends the current segment: logs it, then holds for the length of the end-of-segment sound
+// before `next` takes over (see the finishTransition action).
+function beginTransition(s, now, label, next) {
+  const soundKind = s.mode === "work" ? "workEnd" : "breakEnd";
+  const completedCycles = s.mode === "work" ? s.completedCycles + 1 : s.completedCycles;
+  const entry = {
+    type: s.mode === "work" ? "focus" : s.mode === "longBreak" ? "longBreak" : "break",
+    round: completedCycles,
+    start: s.segmentStart ?? now,
+    end: now,
+  };
+  return {
+    ...s,
+    completedCycles,
+    history: [...s.history, entry].slice(-300),
+    preTransitionLabel: label,
+    isRunning: false,
+    isTransitioning: true,
+    pauseStartedAt: s.pauseStartedAt ?? now, // freeze the countdown where it stopped
+    next: { ...next, at: now + SOUND_DURATION_MS[soundKind] },
+  };
+}
+
+// The current segment is over (timer hit zero, or Skip): work out what follows it
+function completeSegment(s, now, label) {
+  const newCompleted = s.completedCycles + 1;
+  let next;
+  if (s.mode === "work" && s.roundsLimit && newCompleted >= s.roundsLimit) {
+    // the last permitted focus is done — end the session right away, no trailing break
+    next = { complete: true, heading: COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)] };
+  } else if (s.mode === "work") {
+    const isLongBreak = newCompleted % CYCLES_BEFORE_LONG_BREAK === 0 && s.longBreakMinutes !== null;
+    next = { mode: isLongBreak ? "longBreak" : "break", total: (isLongBreak ? s.longBreakMinutes : BREAK_MIN) * 60 };
+  } else {
+    next = { mode: "work", total: WORK_MIN * 60 };
+  }
+  return beginTransition(s, now, label, next);
+}
+
+// Returns the new state, or the same object when the action doesn't apply (e.g. a second
+// participant's click that arrived after the first one already did the same thing).
+function reduce(s, action, now) {
+  switch (action.type) {
+    case "set": {
+      const value = typeof action.value === "function" ? action.value(s[action.key]) : action.value;
+      return value === s[action.key] ? s : { ...s, [action.key]: value };
+    }
+    case "startSession":
+      if (s.setupComplete) return s;
+      return { ...s, setupComplete: true, originalRoundsChoice: s.roundsLimit, ...freshSegment("work", WORK_MIN * 60, now) };
+    case "toggle":
+      if (s.isTransitioning) return s;
+      if (s.isRunning) return { ...s, isRunning: false, pauseStartedAt: now };
+      if (s.segmentStart == null) return { ...s, isRunning: true, segmentStart: now, pausedMs: 0, pauseStartedAt: null };
+      // resuming: fold the just-finished pause into the running total so it isn't counted as
+      // elapsed segment time
+      return {
+        ...s,
+        isRunning: true,
+        pausedMs: s.pausedMs + (s.pauseStartedAt != null ? now - s.pauseStartedAt : 0),
+        pauseStartedAt: null,
+      };
+    case "reset": {
+      if (s.isTransitioning) return s;
+      const minutes = s.mode === "longBreak" ? s.longBreakMinutes ?? LONG_BREAK_MIN : MODES[s.mode].minutes;
+      return { ...s, ...freshSegment(s.mode, minutes * 60, now) };
+    }
+    case "autoComplete":
+      // automatic: timer hit zero
+      if (!s.isRunning || s.isTransitioning || remainingSeconds(s, now) > 0) return s;
+      return completeSegment(s, now, "Pause");
+    case "skip":
+      // reuse the same sound + transition-delay flow as auto-complete, so it's easy to test
+      if (s.isTransitioning) return s;
+      return completeSegment(s, now, toggleLabel(s, now));
+    case "switchToShortBreak":
+      // lets the group cut a 30-min long break short and drop into a fresh 5-min break instead
+      if (s.isTransitioning || s.mode !== "longBreak") return s;
+      return beginTransition(s, now, toggleLabel(s, now), { mode: "break", total: BREAK_MIN * 60 });
+    case "startLongBreak": {
+      // mins lets a one-off long break be started even when the auto-cycle's long break is set to
+      // "None" — it doesn't touch the longBreakMinutes setting, so the 4th-round rule stays as
+      // configured. Falls back to 30 min when it is None, so the manual button always works.
+      if (s.isTransitioning) return s;
+      const minutes = action.mins ?? s.longBreakMinutes ?? LONG_BREAK_MIN;
+      return beginTransition(s, now, toggleLabel(s, now), { mode: "longBreak", total: minutes * 60 });
+    }
+    case "addFiveMinutes":
+      // lets the group top up the current long break by 5 more minutes — extending the total
+      // means the progress ring reflects the new, longer duration instead of jumping backwards
+      if (s.isTransitioning) return s;
+      return { ...s, segmentTotal: s.segmentTotal + 5 * 60 };
+    case "confirmAddRounds": {
+      if (!s.addRoundsModalOpen) return s;
+      let nextMode = "work";
+      if (s.addStartsWithBreak) {
+        nextMode = s.completedCycles % CYCLES_BEFORE_LONG_BREAK === 0 && s.longBreakMinutes !== null ? "longBreak" : "break";
+      }
+      const total = (nextMode === "longBreak" ? s.longBreakMinutes : MODES[nextMode].minutes) * 60;
+      return {
+        ...s,
+        roundsLimit: s.addRoundsAmount === null ? null : (s.roundsLimit ?? 0) + s.addRoundsAmount,
+        addRoundsModalOpen: false,
+        sessionComplete: false,
+        ...freshSegment(nextMode, total, now),
+      };
+    }
+    case "finishTransition":
+      // the sound has finished — start what was lined up
+      if (!s.isTransitioning || !s.next) return s;
+      if (s.next.complete) {
+        return { ...s, isTransitioning: false, next: null, completionHeading: s.next.heading, sessionComplete: true };
+      }
+      return { ...s, isTransitioning: false, next: null, ...freshSegment(s.next.mode, s.next.total, now) };
+    default:
+      return s;
+  }
+}
+
+function PomodoroTimer() {
+  const [state, setState] = useState(INITIAL_STATE);
+  const stateRef = useRef(INITIAL_STATE);
+  const syncRef = useRef(null);
+  // "loading" until we know whether there's a room to sync with and have its current state;
+  // then "synced", "local" (no room: plain standalone timer) or "failed" (room unreachable)
+  const [syncStatus, setSyncStatus] = useState(window.timerSyncReady ? "loading" : "local");
+  const [connected, setConnected] = useState(true);
+  const [, setTick] = useState(0);
+
+  // the shared clock when syncing, so every participant computes the same countdown
+  const now = () => (syncRef.current ? syncRef.current.now() : Date.now());
+
+  // Every change goes through here: applied locally right away, then offered to the room. If
+  // someone else changed the room first, the write is dropped and their state arrives instead.
+  const dispatch = useCallback((action) => {
+    const base = stateRef.current;
+    const reduced = reduce(base, action, now());
+    if (reduced === base) return;
+    const next = { ...reduced, rev: base.rev + 1 };
+    stateRef.current = next;
+    setState(next);
+    if (syncRef.current) syncRef.current.publish(base.rev, next);
+  }, []);
+
+  useEffect(() => {
+    if (!window.timerSyncReady) return;
+    let cancelled = false;
+    // don't leave people staring at a blank screen if the room can't be reached
+    const giveUp = setTimeout(() => setSyncStatus((st) => (st === "loading" ? "failed" : st)), 10000);
+    window.timerSyncReady.then((sync) => {
+      if (cancelled) return;
+      if (!sync) {
+        clearTimeout(giveUp);
+        setSyncStatus(window.timerSyncFailed ? "failed" : "local");
+        return;
+      }
+      syncRef.current = sync;
+      sync.subscribe(
+        (value) => {
+          clearTimeout(giveUp);
+          if (value) {
+            const next = { ...INITIAL_STATE, ...JSON.parse(value.json), rev: value.rev };
+            stateRef.current = next;
+            setState(next);
+          } else if (stateRef.current.rev > 0) {
+            // the room is empty but a timer is already going here (it started before the
+            // connection came up) — make it the room's timer
+            const next = { ...stateRef.current, rev: 1 };
+            stateRef.current = next;
+            setState(next);
+            sync.publish(0, next);
+          }
+          setSyncStatus("synced");
+        },
+        setConnected,
+        (err) => {
+          console.error("Sync read failed:", err);
+          syncRef.current = null;
+          setSyncStatus("failed");
+        }
+      );
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(giveUp);
+    };
+  }, []);
+
+  const {
+    mode, segmentTotal, isRunning, completedCycles, history, logOpen, summaryLogOpen, isTransitioning,
+    preTransitionLabel, longBreakMinutes, roundsLimit, setupComplete, sessionComplete, completionHeading,
+    addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice,
+  } = state;
+
+  const secondsLeft = remainingSeconds(state, now());
   const totalSeconds = segmentTotal;
   const progress = 1 - secondsLeft / totalSeconds;
 
-  const logSegment = useCallback(
-    (endedMode, startTime, endTime) => {
-      if (endedMode === "work") {
-        const newCompleted = completedCycles + 1;
-        setCompletedCycles(newCompleted);
-        setHistory((h) => [...h, { type: "focus", round: newCompleted, start: startTime, end: endTime }]);
-      } else {
-        setHistory((h) => [
-          ...h,
-          { type: endedMode === "longBreak" ? "longBreak" : "break", round: completedCycles, start: startTime, end: endTime },
-        ]);
-      }
-    },
-    [completedCycles]
-  );
+  // same call shape as a useState setter (value or updater function), but shared with the room
+  const setter = (key) => (value) => dispatch({ type: "set", key, value });
+  const setLogOpen = setter("logOpen");
+  const setSummaryLogOpen = setter("summaryLogOpen");
+  const setLongBreakMinutes = setter("longBreakMinutes");
+  const setRoundsLimit = setter("roundsLimit");
+  const setAddRoundsModalOpen = setter("addRoundsModalOpen");
+  const setAddRoundsAmount = setter("addRoundsAmount");
+  const setAddStartsWithBreak = setter("addStartsWithBreak");
 
-  // automatic: timer hit zero — play the sound, show the transition animation,
-  // and only start the next round once the sound has actually finished
-  const handleAutoComplete = useCallback((labelOverride) => {
-    const endTime = new Date();
-    const startTime = segmentStartRef.current || endTime;
-    const endedMode = mode;
-    const soundKind = endedMode === "work" ? "workEnd" : "breakEnd";
-    const newCompletedIfWork = completedCycles + 1;
+  const startSession = () => dispatch({ type: "startSession" });
+  const confirmAddRounds = () => dispatch({ type: "confirmAddRounds" });
+  const handleToggle = () => dispatch({ type: "toggle" });
+  const handleReset = () => dispatch({ type: "reset" });
+  const handleSkip = () => dispatch({ type: "skip" });
+  const switchToShortBreak = () => dispatch({ type: "switchToShortBreak" });
+  const startLongBreak = (mins) => dispatch({ type: "startLongBreak", mins });
+  const addFiveMinutes = () => dispatch({ type: "addFiveMinutes" });
 
-    setPreTransitionLabel(labelOverride ?? "Pause");
-    playSound(soundKind);
-    setIsRunning(false);
-    setIsTransitioning(true);
-    logSegment(endedMode, startTime, endTime);
-    const isLastRound = endedMode === "work" && roundsLimit && newCompletedIfWork >= roundsLimit;
-
-    setTimeout(() => {
-      if (isLastRound) {
-        // the last permitted focus is done — end the session right away, no trailing break
-        setIsTransitioning(false);
-        setCompletionHeading(COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)]);
-        setSessionComplete(true);
-      } else if (endedMode === "work") {
-        const isLongBreak = newCompletedIfWork % CYCLES_BEFORE_LONG_BREAK === 0 && longBreakMinutes !== null;
-        const nextTotal = (isLongBreak ? longBreakMinutes : BREAK_MIN) * 60;
-        setMode(isLongBreak ? "longBreak" : "break");
-        setSecondsLeft(nextTotal);
-        setSegmentTotal(nextTotal);
-        segmentStartRef.current = new Date();
-        pausedMsRef.current = 0;
-        pauseStartedAtRef.current = null;
-        setIsRunning(true);
-        setIsTransitioning(false);
-      } else {
-        setMode("work");
-        setSecondsLeft(WORK_MIN * 60);
-        setSegmentTotal(WORK_MIN * 60);
-        segmentStartRef.current = new Date();
-        pausedMsRef.current = 0;
-        pauseStartedAtRef.current = null;
-        setIsRunning(true);
-        setIsTransitioning(false);
-      }
-    }, SOUND_DURATION_MS[soundKind]);
-  }, [mode, logSegment, completedCycles, longBreakMinutes, roundsLimit]);
-
-  // lets the group cut a 30-min long break short and drop into a fresh 5-min break instead
-  function switchToShortBreak() {
-    const endTime = new Date();
-    const startTime = segmentStartRef.current || endTime;
-    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
-
-    setPreTransitionLabel(label);
-    playSound("breakEnd");
-    setIsRunning(false);
-    setIsTransitioning(true);
-    logSegment("longBreak", startTime, endTime);
-
-    setTimeout(() => {
-      setMode("break");
-      setSecondsLeft(BREAK_MIN * 60);
-      setSegmentTotal(BREAK_MIN * 60);
-      segmentStartRef.current = new Date();
-      pausedMsRef.current = 0;
-      pauseStartedAtRef.current = null;
-      setIsRunning(true);
-      setIsTransitioning(false);
-    }, SOUND_DURATION_MS.breakEnd);
-  }
-
-  // mins lets a one-off long break be started even when the auto-cycle's long break is set to
-  // "None" — it doesn't touch the longBreakMinutes setting, so the 4th-round rule stays as configured
-  function startLongBreak(mins) {
-    // falls back to 30 min when "Long break length" is set to None, so the manual button always works
-    const durationMinutes = mins ?? longBreakMinutes ?? 30;
-    const endTime = new Date();
-    const startTime = segmentStartRef.current || endTime;
-    const endedMode = mode;
-    const soundKind = endedMode === "work" ? "workEnd" : "breakEnd";
-    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
-
-    setPreTransitionLabel(label);
-    playSound(soundKind);
-    setIsRunning(false);
-    setIsTransitioning(true);
-    logSegment(endedMode, startTime, endTime);
-
-    setTimeout(() => {
-      setMode("longBreak");
-      setSecondsLeft(durationMinutes * 60);
-      setSegmentTotal(durationMinutes * 60);
-      segmentStartRef.current = new Date();
-      pausedMsRef.current = 0;
-      pauseStartedAtRef.current = null;
-      setIsRunning(true);
-      setIsTransitioning(false);
-    }, SOUND_DURATION_MS[soundKind]);
-  }
-
-  // lets the group top up the current long break by 5 more minutes — extend the total too,
-  // so the progress ring reflects the new, longer duration instead of appearing to jump backwards
-  function addFiveMinutes() {
-    setSecondsLeft((s) => s + 5 * 60);
-    setSegmentTotal((t) => t + 5 * 60);
-  }
-
-  // Recompute from the real start time (rather than just decrementing by 1 each tick) so a
-  // throttled or fully paused background tab still lands on the correct remaining time —
-  // and completes the round immediately — the moment the phone/tab is looked at again.
-  const syncSecondsLeft = useCallback(() => {
-    const start = segmentStartRef.current;
-    if (!start) return;
-    // still paused right now? count up to this instant instead of leaving a stale pause length
-    const pausedMs = pausedMsRef.current + (pauseStartedAtRef.current ? Date.now() - pauseStartedAtRef.current : 0);
-    const elapsed = Math.floor((Date.now() - start.getTime() - pausedMs) / 1000);
-    const remaining = Math.max(0, segmentTotal - elapsed);
-    setSecondsLeft(remaining);
-    if (remaining <= 0) handleAutoComplete();
-  }, [segmentTotal, handleAutoComplete]);
-
+  // Re-render a few times a second so the derived countdown stays current. Mobile browsers
+  // pause/throttle JS timers while the tab is hidden (backgrounded, screen locked, another app in
+  // front) — there's no way for a web page to keep ticking through that, but re-rendering the
+  // instant the tab becomes visible again means it snaps to the correct value right away.
   useEffect(() => {
-    if (isRunning) {
-      intervalRef.current = setInterval(syncSecondsLeft, 1000);
-    } else {
-      clearInterval(intervalRef.current);
-    }
-    return () => clearInterval(intervalRef.current);
-  }, [isRunning, syncSecondsLeft]);
-
-  // Mobile browsers pause/throttle JS timers while the tab is hidden (backgrounded, screen
-  // locked, another app in front) — there's no way for a web page to keep the countdown
-  // ticking through that, but re-checking the real elapsed time the instant the tab becomes
-  // visible again means it snaps to the correct value (or completes the round) right away
-  // instead of showing a stale number.
-  useEffect(() => {
+    const tick = () => setTick((t) => t + 1);
+    const interval = setInterval(tick, 250);
     const onVisible = () => {
-      if (!document.hidden && isRunning) syncSecondsLeft();
+      if (!document.hidden) tick();
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [isRunning, syncSecondsLeft]);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  // Timer hit zero. Every participant's copy notices this at about the same moment; the first
+  // write wins and the rest receive it.
+  useEffect(() => {
+    if (isRunning && secondsLeft <= 0) dispatch({ type: "autoComplete" });
+  }, [isRunning, secondsLeft, dispatch]);
+
+  // only start the next round once the end-of-segment sound has actually finished
+  const nextAt = state.next ? state.next.at : null;
+  useEffect(() => {
+    if (!isTransitioning || nextAt == null) return;
+    const timeout = setTimeout(() => dispatch({ type: "finishTransition" }), Math.max(0, nextAt - now()));
+    return () => clearTimeout(timeout);
+  }, [isTransitioning, nextAt, dispatch]);
+
+  // The sound plays on each participant's own device, whenever a segment ends — whoever caused it.
+  // During a transition `mode` is still the segment that just ended.
+  const wasTransitioningRef = useRef(false);
+  useEffect(() => {
+    if (isTransitioning && !wasTransitioningRef.current) playSound(mode === "work" ? "workEnd" : "breakEnd");
+    wasTransitioningRef.current = isTransitioning;
+  }, [isTransitioning]);
 
   // Screen Wake Lock: keeps the screen from auto-dimming/locking while a round is running and
   // the tab is in view. Released automatically by the browser once the tab is hidden, and
@@ -570,72 +692,17 @@ function PomodoroTimer() {
     };
   }, [setupComplete, addRoundsModalOpen]);
 
-  function startSession() {
-    setSetupComplete(true);
-    setOriginalRoundsChoice(roundsLimit);
-    setMode("work");
-    setSecondsLeft(WORK_MIN * 60);
-    setSegmentTotal(WORK_MIN * 60);
-    segmentStartRef.current = new Date();
-    pausedMsRef.current = 0;
-    pauseStartedAtRef.current = null;
-    setIsRunning(true);
-  }
+  // nothing to show until the room's current state is known — otherwise someone joining a
+  // session in progress would see the setup popup flash first
+  if (syncStatus === "loading") return <div className="min-h-screen w-full bg-white" />;
 
-  function confirmAddRounds() {
-    setRoundsLimit(addRoundsAmount === null ? null : (r) => (r ?? 0) + addRoundsAmount);
-    setAddRoundsModalOpen(false);
-    setSessionComplete(false);
-    let nextMode = "work";
-    if (addStartsWithBreak) {
-      nextMode = completedCycles % CYCLES_BEFORE_LONG_BREAK === 0 && longBreakMinutes !== null ? "longBreak" : "break";
-    }
-    const nextTotal = (nextMode === "longBreak" ? longBreakMinutes : MODES[nextMode].minutes) * 60;
-    setMode(nextMode);
-    setSecondsLeft(nextTotal);
-    setSegmentTotal(nextTotal);
-    segmentStartRef.current = new Date();
-    pausedMsRef.current = 0;
-    pauseStartedAtRef.current = null;
-    setIsRunning(true);
-  }
-
-  function handleToggle() {
-    setIsRunning((r) => {
-      const newRunning = !r;
-      if (newRunning) {
-        if (!segmentStartRef.current) {
-          segmentStartRef.current = new Date();
-          pausedMsRef.current = 0;
-          pauseStartedAtRef.current = null;
-        } else if (pauseStartedAtRef.current) {
-          // resuming: fold the just-finished pause into the running total so the real-time
-          // recompute doesn't count it as elapsed segment time
-          pausedMsRef.current += Date.now() - pauseStartedAtRef.current;
-          pauseStartedAtRef.current = null;
-        }
-      } else {
-        pauseStartedAtRef.current = Date.now();
-      }
-      return newRunning;
-    });
-  }
-
-  function handleReset() {
-    const baseTotal = (mode === "longBreak" ? longBreakMinutes : MODES[mode].minutes) * 60;
-    setSecondsLeft(baseTotal);
-    setSegmentTotal(baseTotal);
-    segmentStartRef.current = new Date();
-    pausedMsRef.current = 0;
-    pauseStartedAtRef.current = null;
-    setIsRunning(true);
-  }
-
-  function handleSkip() {
-    // reuse the same sound + transition-delay flow as auto-complete, so it's easy to test
-    const label = isRunning ? "Pause" : secondsLeft === totalSeconds ? "Start" : "Resume";
-    handleAutoComplete(label);
-  }
+  const syncNoticeText =
+    syncStatus === "failed" ? "Not synced — this timer is only on your screen" : syncStatus === "synced" && !connected ? "Reconnecting…" : null;
+  const syncNotice = syncNoticeText && (
+    <div className="fixed top-2 left-0 w-full flex justify-center pointer-events-none" style={{ zIndex: 60 }}>
+      <div className="px-3 py-1 rounded-full bg-neutral-800 text-white text-xs">{syncNoticeText}</div>
+    </div>
+  );
 
   const color = MODES[mode].color;
   const shadowColor = MODES[mode].shadowColor;
@@ -660,6 +727,7 @@ function PomodoroTimer() {
   if (sessionComplete) {
     return (
       <div className="min-h-screen w-full flex flex-col bg-white">
+        {syncNotice}
         <div className="flex-1 w-full flex items-center justify-center p-6">
         <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-white rounded-2xl border border-neutral-200 p-6 flex flex-col items-center text-center">
           <div className="text-[30px]">🎉</div>
@@ -778,6 +846,7 @@ function PomodoroTimer() {
 
   return (
     <div className="min-h-screen w-full flex flex-col bg-white">
+        {syncNotice}
       <div className="flex-1 w-full flex items-start justify-center p-6 pt-16">
       {!setupComplete && (
         <div
