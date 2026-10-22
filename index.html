@@ -1072,19 +1072,20 @@ function PomodoroTimer() {
               </div>
             </div>
             <div className="w-full flex flex-col items-center gap-1">
+              {/* keeping the session going is the safe choice, so Cancel is the primary button */}
               <button
-                onClick={endSession}
+                onClick={() => setEndSessionModalOpen(false)}
                 className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
                 style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
               >
-                Yes, end session
+                Cancel
               </button>
               <button
-                onClick={() => setEndSessionModalOpen(false)}
+                onClick={endSession}
                 className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
                 style={{ height: "44px" }}
               >
-                Cancel
+                Yes, end session
               </button>
             </div>
           </div>
