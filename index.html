@@ -389,6 +389,7 @@ const INITIAL_STATE = {
   endedEarly: false, // the session was ended with "End session" rather than by reaching the round limit
   completionHeading: "Great job!",
   addRoundsModalOpen: false,
+  endSessionModalOpen: false, // "Are you sure…?" after pressing End session, shared like every other popup
   addRoundsAmount: 4,
   addStartsWithBreak: true,
   originalRoundsChoice: null,
@@ -537,6 +538,7 @@ function reduce(s, action, now) {
       if (!s.setupComplete || s.sessionComplete || s.isTransitioning) return s;
       return {
         ...s,
+        endSessionModalOpen: false,
         isRunning: false,
         pauseStartedAt: s.pauseStartedAt ?? now,
         sessionComplete: true,
@@ -633,7 +635,7 @@ function PomodoroTimer() {
   const {
     mode, segmentTotal, isRunning, completedCycles, history, logOpen, summaryLogOpen, isTransitioning,
     preTransitionLabel, longBreakMinutes, roundsLimit, setupComplete, sessionComplete, completionHeading,
-    addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice, endedEarly,
+    addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice, endedEarly, endSessionModalOpen,
   } = state;
 
   const secondsLeft = remainingSeconds(state, now());
@@ -647,6 +649,7 @@ function PomodoroTimer() {
   const setLongBreakMinutes = setter("longBreakMinutes");
   const setRoundsLimit = setter("roundsLimit");
   const setAddRoundsModalOpen = setter("addRoundsModalOpen");
+  const setEndSessionModalOpen = setter("endSessionModalOpen");
   const setAddRoundsAmount = setter("addRoundsAmount");
   const setAddStartsWithBreak = setter("addStartsWithBreak");
 
@@ -736,14 +739,14 @@ function PomodoroTimer() {
   // Lock background scroll while a popup covers the screen — otherwise the page behind it can
   // still be scrolled (e.g. by touch drag), even though it's inert and visually dimmed.
   useEffect(() => {
-    const modalOpen = !setupComplete || addRoundsModalOpen;
+    const modalOpen = !setupComplete || addRoundsModalOpen || endSessionModalOpen;
     document.documentElement.style.overflow = modalOpen ? "hidden" : "";
     document.body.style.overflow = modalOpen ? "hidden" : "";
     return () => {
       document.documentElement.style.overflow = "";
       document.body.style.overflow = "";
     };
-  }, [setupComplete, addRoundsModalOpen]);
+  }, [setupComplete, addRoundsModalOpen, endSessionModalOpen]);
 
   // nothing to show until the room's current state is known — otherwise someone joining a
   // session in progress would see the setup popup flash first
@@ -1055,7 +1058,40 @@ function PomodoroTimer() {
         </div>
       )}
 
-      <div inert={!setupComplete ? "" : undefined} className="w-full max-w-sm flex flex-col items-center">
+      {setupComplete && endSessionModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-6"
+          style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+        >
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
+            <div className="w-full text-left">
+              <div className="text-xl font-bold text-neutral-800">Are you sure you want to end the session?</div>
+              <div className="text-sm text-neutral-400 mt-3">
+                The timer will stop for everyone. The session log will only stay on the summary screen until
+                someone sets up a new session.
+              </div>
+            </div>
+            <div className="w-full flex flex-col items-center gap-1">
+              <button
+                onClick={endSession}
+                className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
+                style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
+              >
+                Yes, end session
+              </button>
+              <button
+                onClick={() => setEndSessionModalOpen(false)}
+                className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
+                style={{ height: "44px" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div inert={!setupComplete || endSessionModalOpen ? "" : undefined} className="w-full max-w-sm flex flex-col items-center">
         <div className="text-xl font-bold tracking-wide uppercase" style={{ color }}>
           {MODES[mode].label}
         </div>
@@ -1214,7 +1250,7 @@ function PomodoroTimer() {
             </button>
           )}
           <button
-            onClick={endSession}
+            onClick={() => setEndSessionModalOpen(true)}
             disabled={isTransitioning}
             className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ height: "44px" }}
@@ -1248,7 +1284,7 @@ function PomodoroTimer() {
         </div>
       </div>
       </div>
-      <Credit inert={!setupComplete} />
+      <Credit inert={!setupComplete || endSessionModalOpen} />
     </div>
   );
 }
