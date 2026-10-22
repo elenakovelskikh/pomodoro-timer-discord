@@ -564,7 +564,7 @@ function Dialog({ title, description, enterHint, children, onSubmit, onClose }) 
               }
             : undefined
         }
-        className="w-full max-w-sm bg-page rounded-2xl border border-subtle shadow-xl p-6 flex flex-col items-center gap-6 focus:outline-none"
+        className="w-full max-w-[26rem] bg-page rounded-2xl border border-subtle shadow-xl p-6 flex flex-col items-center gap-6 focus:outline-none"
       >
         <div className="w-full text-left">
           <h2 id={titleId} className="type-heading text-primary">{title}</h2>
@@ -602,6 +602,7 @@ const INITIAL_STATE = {
   completionHeading: "Great job!",
   addRoundsModalOpen: false,
   endSessionModalOpen: false, // "Are you sure…?" after pressing End session, shared like every other popup
+  newSessionModalOpen: false, // the same for Set up new session on the summary screen (the log gets erased)
   addRoundsAmount: 4,
   addStartsWithBreak: true,
   originalRoundsChoice: null,
@@ -909,6 +910,7 @@ function PomodoroTimer() {
     mode, segmentTotal, isRunning, completedCycles, history, logOpen, summaryLogOpen, isTransitioning,
     preTransitionLabel, longBreakMinutes, roundsLimit, setupComplete, sessionComplete, completionHeading,
     addRoundsModalOpen, addRoundsAmount, addStartsWithBreak, originalRoundsChoice, endedEarly, endSessionModalOpen,
+    newSessionModalOpen,
   } = state;
 
   const secondsLeft = remainingSeconds(state, now());
@@ -923,6 +925,7 @@ function PomodoroTimer() {
   const setRoundsLimit = setter("roundsLimit");
   const setAddRoundsModalOpen = setter("addRoundsModalOpen");
   const setEndSessionModalOpen = setter("endSessionModalOpen");
+  const setNewSessionModalOpen = setter("newSessionModalOpen");
   const setAddRoundsAmount = setter("addRoundsAmount");
   const setAddStartsWithBreak = setter("addStartsWithBreak");
 
@@ -1012,14 +1015,14 @@ function PomodoroTimer() {
   // Lock background scroll while a popup covers the screen — otherwise the page behind it can
   // still be scrolled (e.g. by touch drag), even though it's inert and visually dimmed.
   useEffect(() => {
-    const modalOpen = !setupComplete || addRoundsModalOpen || endSessionModalOpen;
+    const modalOpen = !setupComplete || addRoundsModalOpen || endSessionModalOpen || newSessionModalOpen;
     document.documentElement.style.overflow = modalOpen ? "hidden" : "";
     document.body.style.overflow = modalOpen ? "hidden" : "";
     return () => {
       document.documentElement.style.overflow = "";
       document.body.style.overflow = "";
     };
-  }, [setupComplete, addRoundsModalOpen, endSessionModalOpen]);
+  }, [setupComplete, addRoundsModalOpen, endSessionModalOpen, newSessionModalOpen]);
 
   // Keyboard focus when the screen changes underneath it — whoever in the room caused it: the
   // timer screen (after Start, after adding rounds, or on joining a running session) puts focus
@@ -1210,6 +1213,24 @@ function PomodoroTimer() {
     </div>
   );
 
+  // Buttons of a "Are you sure…?" popup. Not going ahead is the safe choice, so Cancel is the
+  // primary button and comes first. While both fit on one line (a row at least `fitsFrom` wide)
+  // each is as wide as its text, Cancel on the left edge and the other on the right; narrower,
+  // they stack at full width with Cancel on top. The basis is huge and positive below the
+  // threshold (one button per line, capped at full width) and negative, so ignored, above it.
+  // The two thresholds are written out in full so Tailwind finds the classes.
+  const CONFIRM_BASIS = { "18.5rem": "basis-[calc((18.5rem_-_100%)*999)]", "20.75rem": "basis-[calc((20.75rem_-_100%)*999)]" };
+  const confirmButtons = ({ onCancel, confirmLabel, onConfirm, fitsFrom }) => (
+    <div className="w-full flex flex-wrap justify-between gap-2">
+      <button onClick={onCancel} className={`${primaryButton.replace("w-full ", "")} max-w-full ${CONFIRM_BASIS[fitsFrom]}`} style={primaryShadow}>
+        Cancel
+      </button>
+      <button onClick={onConfirm} className={`${secondaryButton.replace("w-full ", "")} max-w-full ${CONFIRM_BASIS[fitsFrom]}`}>
+        {confirmLabel}
+      </button>
+    </div>
+  );
+
   if (sessionComplete) {
     const openAddRounds = () => {
       setAddRoundsAmount(originalRoundsChoice ?? 4);
@@ -1222,7 +1243,7 @@ function PomodoroTimer() {
         {syncNotice}
         <main className="flex-1 w-full flex items-center justify-center p-6">
         <h1 className="sr-only">Violet Tomato – Automatic Pomodoro Focus Timer</h1>
-        <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-page rounded-2xl border border-subtle p-6 flex flex-col items-center text-center">
+        <div inert={addRoundsModalOpen || newSessionModalOpen ? "" : undefined} className="w-full max-w-xs bg-page rounded-2xl border border-subtle p-6 flex flex-col items-center text-center">
           <div className="type-emoji leading-normal" aria-hidden="true">🎉</div>
           <div className="w-full flex flex-col items-center mt-5">
             <h2 ref={completionHeadingRef} tabIndex={-1} className="type-heading text-primary focus:outline-none">{completionHeading}</h2>
@@ -1250,10 +1271,25 @@ function PomodoroTimer() {
           <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
             Add more rounds
           </button>
-          <button onClick={newSession} className={`${tertiaryButton} w-full`}>
+          <button onClick={() => setNewSessionModalOpen(true)} className={`${tertiaryButton} w-full`}>
             Set up new session
           </button>
         </div>
+
+        {newSessionModalOpen && (
+          <Dialog
+            title="Set up new session"
+            description="Are you sure you want to set up a new session? The session log will be deleted, and this can't be undone."
+            onClose={() => setNewSessionModalOpen(false)}
+          >
+            {confirmButtons({
+              onCancel: () => setNewSessionModalOpen(false),
+              confirmLabel: "Yes, set up new session",
+              onConfirm: newSession,
+              fitsFrom: "20.75rem",
+            })}
+          </Dialog>
+        )}
 
         {addRoundsModalOpen && (
           <Dialog
@@ -1290,7 +1326,7 @@ function PomodoroTimer() {
           </Dialog>
         )}
         </main>
-        <Credit inert={addRoundsModalOpen} />
+        <Credit inert={addRoundsModalOpen || newSessionModalOpen} />
       </div>
     );
   }
@@ -1331,26 +1367,12 @@ function PomodoroTimer() {
           description="Are you sure you want to end the session? This will stop the timer for everyone and can't be undone."
           onClose={() => setEndSessionModalOpen(false)}
         >
-          {/* Keeping the session going is the safe choice, so Cancel is the primary button and
-              comes first. While both fit on one line (a row of 18.5rem or more) each is as wide as
-              its text, Cancel on the left edge and Yes on the right; narrower, they stack at full
-              width with Cancel on top. The basis is huge and positive below the threshold (one
-              button per line, capped at full width) and negative, so ignored, above it. */}
-          <div className="w-full flex flex-wrap justify-between gap-2">
-            <button
-              onClick={() => setEndSessionModalOpen(false)}
-              className={`${primaryButton.replace("w-full ", "")} max-w-full basis-[calc((18.5rem_-_100%)*999)]`}
-              style={primaryShadow}
-            >
-              Cancel
-            </button>
-            <button
-              onClick={endSession}
-              className={`${secondaryButton.replace("w-full ", "")} max-w-full basis-[calc((18.5rem_-_100%)*999)]`}
-            >
-              Yes, end session
-            </button>
-          </div>
+          {confirmButtons({
+            onCancel: () => setEndSessionModalOpen(false),
+            confirmLabel: "Yes, end session",
+            onConfirm: endSession,
+            fitsFrom: "18.5rem",
+          })}
         </Dialog>
       )}
 
