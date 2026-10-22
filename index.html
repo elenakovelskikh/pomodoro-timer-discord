@@ -15,12 +15,15 @@
 <script src="vendor/react-dom.production.min.js"></script>
 <script src="vendor/babel.min.js"></script>
 <script src="vendor/tailwindcss-3.4.17.js"></script>
+<!-- the same design tokens as the website (copy of pomodoro-timer/design-tokens.js) -->
+<script src="design-tokens.js"></script>
 <script>
   // Without this, tapping a button on a touch device leaves its hover: styles (e.g. the
   // darker background on the round control buttons) stuck on until something else is tapped,
   // since there's no mouse to trigger a "leave". This scopes every hover: utility to devices
   // that actually support hovering, matching how a real mouse/trackpad behaves.
-  tailwind.config = { future: { hoverOnlyWhenSupported: true } };
+  // theme + plugin: the tokens from design-tokens.js replace Tailwind's palette and type scale
+  tailwind.config = { future: { hoverOnlyWhenSupported: true }, theme: DESIGN_TOKENS.THEME, plugins: [DESIGN_TOKENS.typePlugin] };
 </script>
 <!-- Discord Activity wrapper + shared timer state. Inside Discord the room is the Activity instance,
      so everyone in the voice channel sees one timer; in a plain browser, open the page with
@@ -158,13 +161,26 @@ window.timerSyncReady = (async () => {
   /* Tapping a button on mobile leaves the browser's default focus outline stuck on it until
      something else is tapped. Keep the outline for real keyboard navigation (:focus-visible),
      drop it after a touch/mouse click. */
-  button:focus:not(:focus-visible) {
+  button:focus:not(:focus-visible), a:focus:not(:focus-visible) {
     outline: none;
   }
-  /* Keyboard focus ring: leave the browser's own default outline (color/style/width) alone,
-     just push it 2px away from the button so there's a transparent gap first. */
-  button:focus-visible {
+  /* Keyboard focus ring: the same on every button, radio pill and link — the browser's own default
+     outline (color/style/width), pushed 2px away so there's a transparent gap first. */
+  button:focus-visible, a:focus-visible {
     outline-offset: 2px;
+  }
+  /* Focus the page moved by itself after a tap or click (see moveFocus): no ring until the
+     keyboard is used. */
+  [data-quiet-focus]:focus-visible {
+    outline: none;
+  }
+  /* "Reduce motion" in the system settings: the ring jumps instead of gliding and doesn't pulse
+     between rounds. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
   }
 </style>
 </head>
@@ -179,7 +195,7 @@ window.timerSyncReady = (async () => {
 </noscript>
 </div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useId } = React;
 
 const WORK_MIN = 25;
 const BREAK_MIN = 5;
@@ -200,10 +216,14 @@ const START_WITH_OPTIONS = [
 
 const COMPLETION_HEADINGS = ["Great job!", "Nice work!", "You crushed it!", "Well done!", "Way to go!", "Amazing focus!"];
 
+const { MODE_COLORS } = window.DESIGN_TOKENS;
+
+// "work" is the focus mode's key in the shared room state (kept as is so rooms stay compatible);
+// its colors are the tokens' focus colors.
 const MODES = {
-  work: { label: "Focus", minutes: WORK_MIN, color: "#7c3aed", arcColor: "#d1baf6", shadowColor: "#7c3aed", emoji: ["📚", "💻", "✍️"], bg: "#f5f3ff" },
-  break: { label: "Break", minutes: BREAK_MIN, color: "#009AE2", arcColor: "#abdef5", shadowColor: "#006DA1", emoji: "☕", bg: "#f0f9ff" },
-  longBreak: { label: "Long break", minutes: LONG_BREAK_MIN, color: "#009C99", arcColor: "#ABDEDD", shadowColor: "#007371", emoji: "🌴", bg: "#ecfeff" },
+  work: { label: "Focus", minutes: WORK_MIN, ...MODE_COLORS.focus, emoji: ["📚", "💻", "✍️"] },
+  break: { label: "Break", minutes: BREAK_MIN, ...MODE_COLORS.break, emoji: "☕" },
+  longBreak: { label: "Long break", minutes: LONG_BREAK_MIN, ...MODE_COLORS.longBreak, emoji: "🌴" },
 };
 
 function formatTime(s) {
@@ -270,9 +290,15 @@ function playSound(kind) {
 // how long each melody actually plays, used to hold off starting the next round
 const SOUND_DURATION_MS = { workEnd: 1900, breakEnd: 1400 };
 
+// size is given in px at the default 16px root font size and rendered in rem, so icons scale with text
 function Icon({ children, size = 18, className, style }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+    <svg
+      viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true" focusable="false"
+      className={className}
+      style={{ width: `${size / 16}rem`, height: `${size / 16}rem`, ...style }}
+    >
       {children}
     </svg>
   );
@@ -287,10 +313,9 @@ const MinusIcon = (props) => <Icon {...props}><line x1="5" y1="12" x2="19" y2="1
 const PlusIcon = (props) => <Icon {...props}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></Icon>;
 
 // A proper ARIA radiogroup: one tab stop for the whole group (only the checked option is in the
-// tab order), Left/Up and Right/Down move the checked option and keyboard focus together. Since
-// focus and selection always coincide here, the checked pill's own ring already shows where
-// focus is — no separate focus ring is drawn on top of it.
-function RadioGroup({ label, options, value, onChange, pillClassName }) {
+// tab order), Left/Up and Right/Down move the checked option and keyboard focus together.
+// The keyboard focus ring is the same as on every other button (see the <style> block).
+function RadioGroup({ label, options, value, onChange }) {
   function handleKeyDown(e) {
     const dir = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (!dir) return;
@@ -303,8 +328,8 @@ function RadioGroup({ label, options, value, onChange, pillClassName }) {
 
   return (
     <div className="w-full flex flex-col items-start gap-2">
-      <div className="text-sm font-medium text-neutral-600">{label}</div>
-      <div role="radiogroup" aria-label={label} onKeyDown={handleKeyDown} className="flex gap-2">
+      <div className="type-control text-label">{label}</div>
+      <div role="radiogroup" aria-label={label} onKeyDown={handleKeyDown} className="flex flex-wrap gap-2">
         {options.map((opt) => {
           const selected = value === opt.value;
           return (
@@ -315,10 +340,10 @@ function RadioGroup({ label, options, value, onChange, pillClassName }) {
               aria-checked={selected}
               tabIndex={selected ? 0 : -1}
               onClick={() => onChange(opt.value)}
-              className={`${pillClassName} focus-visible:outline-none ${
+              className={`px-6 py-3 rounded-xl type-control whitespace-nowrap ${
                 selected
-                  ? "ring-2 ring-inset ring-violet-500 bg-violet-50 text-violet-700"
-                  : "ring-1 ring-inset ring-neutral-200 text-neutral-500"
+                  ? "ring-2 ring-inset ring-radio-selected bg-radio-selected text-radio-selected"
+                  : "ring-1 ring-inset ring-radio hover:ring-radio-hover text-button-tertiary hover:text-button-tertiary-hover"
               }`}
             >
               {opt.label}
@@ -336,8 +361,8 @@ function HistoryLog({ history }) {
       {history.map((entry, i) => {
         const label = entry.type === "focus" ? "focus" : entry.type === "break" ? "break" : "long break";
         return (
-          <div key={i} className="flex text-xs" style={{ color: "#666666" }}>
-            <span className="inline-block" style={{ width: "80px" }}>{label}</span>
+          <div key={i} className="flex type-caption text-secondary">
+            <span className="inline-block w-20">{label}</span>
             <span className="font-mono">
               {formatClock(new Date(entry.start))} – {formatClock(new Date(entry.end))}
             </span>
@@ -348,22 +373,164 @@ function HistoryLog({ history }) {
   );
 }
 
+// The links are 24px tall (WCAG 2.5.8 minimum target size) even though the text is 10px;
+// the row's padding is trimmed to match, so the footer keeps its height.
 function Credit({ inert }) {
+  const link = "inline-flex items-center min-h-6 hover:text-label underline";
   return (
-    <div
+    <footer
       inert={inert ? "" : undefined}
-      className="w-full flex items-center justify-center gap-1 py-4"
-      style={{ fontSize: "10px", color: "#999999" }}
+      className="w-full flex items-center justify-center gap-1 py-[0.6875rem] type-credit text-muted"
     >
       <span>Made by Elena Kovelskikh</span>
-      <span>·</span>
-      <a href="https://www.linkedin.com/in/kovelskikh/" target="_blank" rel="noopener noreferrer" className="hover:text-neutral-600 underline">
-        LinkedIn
+      <span aria-hidden="true">·</span>
+      <a href="https://www.linkedin.com/in/kovelskikh/" target="_blank" rel="noopener noreferrer" className={link}>
+        LinkedIn<span className="sr-only"> (opens in a new tab)</span>
       </a>
-      <span>·</span>
-      <a href="https://github.com/elenakovelskikh" target="_blank" rel="noopener noreferrer" className="hover:text-neutral-600 underline">
-        GitHub
+      <span aria-hidden="true">·</span>
+      <a href="https://github.com/elenakovelskikh" target="_blank" rel="noopener noreferrer" className={link}>
+        GitHub<span className="sr-only"> (opens in a new tab)</span>
       </a>
+    </footer>
+  );
+}
+
+// The page moves focus itself in a few places (into a popup, back out, to Play/Pause), which
+// screen readers rely on. Browsers then show the keyboard focus ring even after a tap or click,
+// so when the last input was a pointer, the element is marked to hide the ring until a key
+// is pressed or focus leaves it.
+let lastInputWasPointer = false;
+document.addEventListener("pointerdown", () => { lastInputWasPointer = true; }, true);
+document.addEventListener("keydown", () => {
+  lastInputWasPointer = false;
+  delete document.activeElement?.dataset?.quietFocus;
+}, true);
+function moveFocus(el) {
+  if (!el?.focus) return;
+  if (lastInputWasPointer) {
+    el.dataset.quietFocus = "";
+    el.addEventListener("blur", () => delete el.dataset.quietFocus, { once: true });
+  }
+  el.focus();
+}
+
+// Rounds picker: − / value / +. value is a number of rounds or null for "no limit" (∞).
+// At an end of the range its button is disabled and out of the Tab order, with one exception:
+// if that button was just pressed to reach the limit, it stays focusable (aria-disabled) until
+// focus leaves it, so keyboard focus isn't dropped. The value is a polite live region, read out
+// after each press.
+function RoundsStepper({ label, value, onChange }) {
+  const labelId = useId();
+  const atMin = value === null;
+  const atMax = value === 16;
+  // "min" or "max": the end the user just reached with that button, while it still has focus
+  const [held, setHeld] = useState(null);
+  const step =
+    "w-11 h-11 flex items-center justify-center bg-button-secondary text-button-secondary hover:text-button-secondary-hover hover:bg-button-secondary-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-button-secondary disabled:hover:text-button-secondary aria-disabled:opacity-40 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-button-secondary aria-disabled:hover:text-button-secondary";
+  const press = (next, end) => {
+    if (next === null || next === 16) setHeld(end);
+    onChange(next);
+  };
+  return (
+    <div role="group" aria-labelledby={labelId} className="w-full flex flex-col items-start gap-2">
+      <div id={labelId} className="type-control text-label">{label}</div>
+      <div className="flex items-stretch rounded-xl border border-subtle">
+        <button
+          type="button"
+          aria-label="Fewer rounds"
+          disabled={atMin && held !== "min"}
+          aria-disabled={(atMin && held === "min") || undefined}
+          onClick={() => !atMin && press(value === 1 ? null : value - 1, "min")}
+          onBlur={() => held === "min" && setHeld(null)}
+          className={`${step} rounded-l-xl`}
+        >
+          <MinusIcon size={20} />
+        </button>
+        <span className="w-24 flex items-center justify-center border-x border-subtle" aria-live="polite" aria-atomic="true">
+          <span className="flex items-baseline gap-1.5 tabular-nums">
+            {atMin ? (
+              <>
+                <span className="type-heading text-primary" aria-hidden="true">∞</span>
+                <span className="sr-only">No limit</span>
+              </>
+            ) : (
+              <>
+                <span className="type-heading text-primary">{value}</span>
+                <span className="type-body text-primary">{value === 1 ? "round" : "rounds"}</span>
+              </>
+            )}
+          </span>
+        </span>
+        <button
+          type="button"
+          aria-label="More rounds"
+          disabled={atMax && held !== "max"}
+          aria-disabled={(atMax && held === "max") || undefined}
+          onClick={() => !atMax && press(atMin ? 1 : value + 1, "max")}
+          onBlur={() => held === "max" && setHeld(null)}
+          className={`${step} rounded-r-xl`}
+        >
+          <PlusIcon size={20} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Popup over the page: a modal dialog named by its title, with its text as the description, so
+// screen readers read both when it opens. While focus is on the dialog itself (right after it
+// opens), Enter runs onSubmit — the primary button with the current settings; once focus is on a
+// control, Enter presses that control as usual. enterHint tells screen reader users about it.
+// Focus moves into it when it opens and
+// goes back to whatever had it before when it closes; Escape closes it if onClose is given.
+// The page behind it is made inert by the caller, so Tab can't leave the dialog.
+function Dialog({ title, description, enterHint, children, onSubmit, onClose }) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const hintId = useId();
+  const ref = useRef(null);
+  useEffect(() => {
+    const previous = document.activeElement;
+    moveFocus(ref.current);
+    return () => moveFocus(previous);
+  }, []);
+  return (
+    // The veil scrolls when the popup is taller than the screen (phone in landscape, 200% zoom);
+    // otherwise the popup sits in the middle.
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-overlay"
+      onKeyDown={onClose ? (e) => e.key === "Escape" && onClose() : undefined}
+    >
+      <div className="min-h-full flex items-center justify-center p-6">
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={[description && descriptionId, enterHint && hintId].filter(Boolean).join(" ") || undefined}
+        tabIndex={-1}
+        onKeyDown={
+          onSubmit
+            ? (e) => {
+                if (e.key !== "Enter" || e.target !== e.currentTarget) return;
+                // otherwise the same keypress also clicks whatever button gets focus next
+                e.preventDefault();
+                onSubmit();
+              }
+            : undefined
+        }
+        className="w-full max-w-sm bg-page rounded-2xl border border-subtle shadow-xl p-6 flex flex-col items-center gap-6 focus:outline-none"
+      >
+        <div className="w-full text-left">
+          <h2 id={titleId} className="type-heading text-primary">{title}</h2>
+          {description && <p id={descriptionId} className="type-body text-secondary mt-3">{description}</p>}
+          {/* hidden: read only as part of the dialog's description when it opens, so the VoiceOver
+              cursor doesn't stop on it (it would frame the whole popup for an invisible element) */}
+          {enterHint && <p id={hintId} hidden>{enterHint}</p>}
+        </div>
+        {children}
+      </div>
+      </div>
     </div>
   );
 }
@@ -748,21 +915,69 @@ function PomodoroTimer() {
     };
   }, [setupComplete, addRoundsModalOpen, endSessionModalOpen]);
 
+  // Keyboard focus when the screen changes underneath it — whoever in the room caused it: the
+  // timer screen (after Start, after adding rounds, or on joining a running session) puts focus
+  // on Play/Pause, the summary screen on its heading. Other changes (someone pausing, skipping)
+  // leave each participant's focus where it is.
+  const playPauseRef = useRef(null);
+  const completionHeadingRef = useRef(null);
+  const timerScreen = syncStatus !== "loading" && setupComplete && !sessionComplete;
+  useEffect(() => {
+    if (timerScreen) moveFocus(playPauseRef.current);
+  }, [timerScreen]);
+  useEffect(() => {
+    if (sessionComplete) moveFocus(completionHeadingRef.current);
+  }, [sessionComplete]);
+
+  const completeText = mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete";
+  const roundsText =
+    completedCycles === 0
+      ? "No rounds completed"
+      : completedCycles === 1
+      ? "You completed 1 round"
+      : `You completed ${endedEarly ? "" : "all "}${completedCycles} rounds`;
+
+  // Read out by screen readers whenever it changes: round starts, round ends, session end —
+  // for everyone in the room, whoever caused it. It doesn't include the time, so it stays quiet
+  // while the clock ticks.
+  const status =
+    syncStatus === "loading" || !setupComplete
+      ? ""
+      : sessionComplete
+      ? `${completionHeading} ${roundsText}`
+      : isTransitioning
+      ? completeText
+      : mode === "work"
+      ? `Focus, round ${completedCycles + 1}`
+      : MODES[mode].label;
+  // The live region gets the text a moment later: the same click or Enter also moves focus (e.g.
+  // Start → Pause), and VoiceOver drops a live update that lands together with a focus change.
+  const [announcement, setAnnouncement] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setAnnouncement(status), 700);
+    return () => clearTimeout(t);
+  }, [status]);
+  // First child of every screen's root, so React keeps the same element when the screen switches
+  // and the change is announced.
+  const announcer = <div className="sr-only" role="status">{announcement}</div>;
+
   // nothing to show until the room's current state is known — otherwise someone joining a
   // session in progress would see the setup popup flash first
-  if (syncStatus === "loading") return <div className="min-h-screen w-full bg-white" />;
+  if (syncStatus === "loading") return <div className="min-h-screen w-full bg-page" />;
 
   const syncNoticeText =
     syncStatus === "failed" ? "Not synced — this timer is only on your screen" : syncStatus === "synced" && !connected ? "Reconnecting…" : null;
   const syncNotice = syncNoticeText && (
-    <div className="fixed top-2 left-0 w-full flex justify-center pointer-events-none" style={{ zIndex: 60 }}>
-      <div className="px-3 py-1 rounded-full bg-neutral-800 text-white text-xs">{syncNoticeText}</div>
+    <div className="fixed top-2 left-0 w-full flex justify-center pointer-events-none z-[60]">
+      <div className="px-3 py-1 rounded-full bg-notice text-notice type-caption">{syncNoticeText}</div>
     </div>
   );
 
-  const color = MODES[mode].color;
-  const shadowColor = MODES[mode].shadowColor;
-  const arcColor = MODES[mode].arcColor;
+  const accent = MODES[mode].accent;
+  const shadowColor = MODES[mode].shadow;
+  const arcColor = MODES[mode].arc;
+  // the current mode's colors for text-mode and bg-button-mode
+  const modeVars = { "--mode-accent": accent, "--mode-accent-hover": MODES[mode].accentHover };
   const radius = 120;
   const circumference = 2 * Math.PI * radius;
   // The colored arc is the time remaining: it starts full at 12 o'clock and its moving end
@@ -798,23 +1013,25 @@ function PomodoroTimer() {
     const caption = sessionComplete
       ? `${completedCycles} completed`
       : isTransitioning
-      ? mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete"
+      ? completeText
       : !setupComplete
       ? "Not started"
       : !isRunning
       ? "Paused"
       : centerLabel;
+    // Sizes are scaled inline (the text styles' fixed sizes would not fit); colors are tokens.
     return (
-      <div className="w-full flex flex-col items-center justify-center bg-white overflow-hidden" style={{ height: "100vh" }}>
-        <div className="font-bold tracking-wide uppercase" style={{ color, fontSize: px(20), lineHeight: 1 }}>
+      <div className="w-full flex flex-col items-center justify-center bg-page overflow-hidden" style={{ height: "100vh", ...modeVars }}>
+        {announcer}
+        <div className="font-bold tracking-wide uppercase text-mode" style={{ fontSize: px(20), lineHeight: 1 }}>
           {sessionComplete ? "Done" : MODES[mode].label}
         </div>
         <div
           className={`relative ${isTransitioning ? "animate-pulse" : ""}`}
           style={{ width: px(288), height: px(288), marginTop: px(24) }}
         >
-          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280">
-            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="10" />
+          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280" aria-hidden="true" focusable="false">
+            <circle cx="140" cy="140" r={radius} fill="none" className="stroke-ring-track" strokeWidth="10" />
             {!sessionComplete && secondsLeft > 0 && (
               <circle
                 cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="10"
@@ -824,19 +1041,19 @@ function PomodoroTimer() {
             )}
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <div className="flex items-center justify-center" style={{ gap: px(4), height: px(30), marginBottom: px(12) }}>
+            <div className="flex items-center justify-center" style={{ gap: px(4), height: px(30), marginBottom: px(12) }} aria-hidden="true">
               {emoji.map((e, i) => (
                 <span key={i} style={{ fontSize: px(30), lineHeight: 1 }}>{e}</span>
               ))}
             </div>
             {!sessionComplete && !isTransitioning && (
-              <div className="font-bold tabular-nums text-neutral-800" style={{ fontSize: px(48), lineHeight: 1 }}>
+              <div className="font-bold tabular-nums text-primary" style={{ fontSize: px(48), lineHeight: 1 }}>
                 {formatTime(secondsLeft)}
               </div>
             )}
             {/* the caption is the one thing not scaled all the way down: 14px would become unreadable */}
             <div
-              className="flex items-center justify-center text-neutral-400"
+              className="flex items-center justify-center text-secondary"
               style={{ fontSize: Math.max(8, px(14)), lineHeight: 1, height: px(30), marginTop: px(12) }}
             >
               {caption}
@@ -847,258 +1064,179 @@ function PomodoroTimer() {
     );
   }
 
+  const primaryButton = "w-full h-11 px-6 rounded-xl text-button-primary type-button bg-button-primary hover:bg-button-primary-hover whitespace-nowrap";
+  const primaryShadow = { boxShadow: `0 2px 8px -2px ${MODE_COLORS.focus.shadow}59` };
+  const secondaryButton =
+    "w-full h-11 px-6 rounded-xl bg-button-secondary type-button text-button-secondary hover:text-button-secondary-hover hover:bg-button-secondary-hover whitespace-nowrap";
+  const tertiaryButton =
+    "flex items-center justify-center type-control text-button-tertiary hover:text-button-tertiary-hover aria-disabled:opacity-40 aria-disabled:cursor-not-allowed h-11";
+  // Two buttons in a popup: one row (secondary hugging its text, primary taking the rest) while
+  // both labels fit on one line; once they don't, the primary wraps onto its own line and
+  // wrap-reverse puts it above the secondary, both full width. The 1 : 999 grow ratio keeps the
+  // secondary hugging in the one-row case.
+  const buttonRow = (secondary, primary) => (
+    <div className="w-full flex flex-wrap-reverse gap-2">
+      <div className="grow">{secondary}</div>
+      <div className="grow-[999]">{primary}</div>
+    </div>
+  );
+
   if (sessionComplete) {
+    const openAddRounds = () => {
+      setAddRoundsAmount(originalRoundsChoice ?? 4);
+      setAddStartsWithBreak(true);
+      setAddRoundsModalOpen(true);
+    };
     return (
-      <div className="min-h-screen w-full flex flex-col bg-white">
+      <div className="min-h-screen w-full flex flex-col bg-page">
+        {announcer}
         {syncNotice}
-        <div className="flex-1 w-full flex items-center justify-center p-6">
-        <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-white rounded-2xl border border-neutral-200 p-6 flex flex-col items-center text-center">
-          <div className="text-[30px]">{completedCycles > 0 ? "🎉" : "👋"}</div>
-          <div className="w-full flex flex-col items-center" style={{ marginTop: "20px" }}>
-            <div className="text-xl font-bold text-neutral-800">{completionHeading}</div>
+        <main className="flex-1 w-full flex items-center justify-center p-6">
+        <h1 className="sr-only">Violet Tomato – Automatic Pomodoro Focus Timer</h1>
+        <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-page rounded-2xl border border-subtle p-6 flex flex-col items-center text-center">
+          <div className="type-emoji leading-normal" aria-hidden="true">{completedCycles > 0 ? "🎉" : "👋"}</div>
+          <div className="w-full flex flex-col items-center mt-5">
+            <h2 ref={completionHeadingRef} tabIndex={-1} className="type-heading text-primary focus:outline-none">{completionHeading}</h2>
             <button
               onClick={() => setSummaryLogOpen((o) => !o)}
               disabled={history.length === 0}
-              className="w-full flex items-center justify-center gap-1 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:hover:text-neutral-500 disabled:cursor-default"
-              style={{ height: "44px", marginTop: "8px" }}
+              aria-expanded={history.length > 0 ? summaryLogOpen : undefined}
+              aria-controls={history.length > 0 ? "summary-log" : undefined}
+              className="w-full flex items-center justify-center gap-1 type-control text-button-tertiary hover:text-button-tertiary-hover disabled:hover:text-button-tertiary disabled:cursor-default h-11 mt-2"
             >
-              <span>
-                {completedCycles === 0
-                  ? "No rounds completed"
-                  : completedCycles === 1
-                  ? "You completed 1 round"
-                  : `You completed ${endedEarly ? "" : "all "}${completedCycles} rounds`}
-              </span>
+              <span>{roundsText}</span>
               {history.length > 0 &&
                 (summaryLogOpen ? (
-                  <ChevronUpIcon size={16} style={{ color: "#808080" }} />
+                  <ChevronUpIcon size={16} />
                 ) : (
-                  <ChevronDownIcon size={16} style={{ color: "#808080" }} />
+                  <ChevronDownIcon size={16} />
                 ))}
             </button>
             {summaryLogOpen && history.length > 0 && (
-              <div style={{ marginBottom: "12px" }}>
+              <div id="summary-log" className="mb-3">
                 <HistoryLog history={history} />
               </div>
             )}
           </div>
-          {(() => {
-            const ghostClass = "w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700";
-            const openAddRounds = () => {
-              setAddRoundsAmount(originalRoundsChoice ?? 4);
-              setAddStartsWithBreak(true);
-              setAddRoundsModalOpen(true);
-            };
-            // with no rounds done there's nothing to add to — starting afresh is the obvious next
-            // step, so it becomes the primary button
-            return completedCycles === 0 ? (
-              <>
-                <button
-                  onClick={newSession}
-                  className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
-                  style={{ boxShadow: "0 2px 8px -2px #7c3aed59", marginTop: "12px" }}
-                >
-                  Set up new session
-                </button>
-                <button onClick={openAddRounds} className={ghostClass} style={{ height: "44px", marginTop: "4px" }}>
-                  Add more rounds
-                </button>
-              </>
-            ) : (
-              <>
-                <button onClick={openAddRounds} className={ghostClass} style={{ height: "44px", marginTop: "4px" }}>
-                  Add more rounds
-                </button>
-                <button onClick={newSession} className={ghostClass} style={{ height: "44px" }}>
-                  Set up new session
-                </button>
-              </>
-            );
-          })()}
+          {/* with no rounds done there's nothing to add to — starting afresh is the obvious next
+              step, so it becomes the primary button */}
+          {completedCycles === 0 ? (
+            <>
+              <button onClick={newSession} className={`${primaryButton} mt-3`} style={primaryShadow}>
+                Set up new session
+              </button>
+              <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
+                Add more rounds
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
+                Add more rounds
+              </button>
+              <button onClick={newSession} className={`${tertiaryButton} w-full`}>
+                Set up new session
+              </button>
+            </>
+          )}
         </div>
 
         {addRoundsModalOpen && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-6"
-            style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+          <Dialog
+            title="Add more rounds"
+            enterHint="Press Enter to add the rounds, or Escape to cancel."
+            onSubmit={confirmAddRounds}
+            onClose={() => setAddRoundsModalOpen(false)}
           >
-            <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
-              <div className="w-full flex flex-col items-start gap-2">
-                <div className="text-sm font-medium text-neutral-600">How many more rounds?</div>
-                <div className="flex items-stretch rounded-xl border border-neutral-200">
-                  <button
-                    onClick={() => setAddRoundsAmount((n) => (n === null ? null : n === 1 ? null : n - 1))}
-                    disabled={addRoundsAmount === null}
-                    className="w-11 h-11 flex items-center justify-center rounded-l-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
-                  >
-                    <MinusIcon size={20} />
-                  </button>
-                  <span className="w-24 flex items-center justify-center border-x border-neutral-200">
-                    <span className="flex items-baseline gap-1.5 tabular-nums">
-                      <span className="text-xl font-bold text-neutral-800 leading-none">{addRoundsAmount === null ? "∞" : addRoundsAmount}</span>
-                      {addRoundsAmount !== null && (
-                        <span className="text-sm text-neutral-800 leading-none">{addRoundsAmount === 1 ? "round" : "rounds"}</span>
-                      )}
-                    </span>
-                  </span>
-                  <button
-                    onClick={() => setAddRoundsAmount((n) => (n === null ? 1 : Math.min(16, n + 1)))}
-                    disabled={addRoundsAmount === 16}
-                    className="w-11 h-11 flex items-center justify-center rounded-r-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
-                  >
-                    <PlusIcon size={20} />
-                  </button>
-                </div>
-              </div>
-              <RadioGroup
-                label="Start with"
-                options={START_WITH_OPTIONS}
-                value={addStartsWithBreak}
-                onChange={setAddStartsWithBreak}
-                pillClassName="px-6 py-3 rounded-xl text-sm font-medium"
-              />
-              <RadioGroup
-                label="Long break length"
-                options={LONG_BREAK_OPTIONS}
-                value={longBreakMinutes}
-                onChange={setLongBreakMinutes}
-                pillClassName="px-4 py-3 rounded-xl text-sm font-medium whitespace-nowrap"
-              />
-              <div className="w-full flex flex-col items-center gap-1">
-                <button
-                  onClick={confirmAddRounds}
-                  className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
-                  style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
-                >
-                  {addRoundsAmount === null
-                    ? "Continue without a limit"
-                    : addRoundsAmount === 1
-                    ? "Add 1 round"
-                    : `Add ${addRoundsAmount} rounds`}
-                </button>
-                <button
-                  onClick={() => setAddRoundsModalOpen(false)}
-                  className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
-                  style={{ height: "44px" }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
+            <RoundsStepper label="Number of rounds" value={addRoundsAmount} onChange={setAddRoundsAmount} />
+            <RadioGroup
+              label="Start with"
+              options={START_WITH_OPTIONS}
+              value={addStartsWithBreak}
+              onChange={setAddStartsWithBreak}
+            />
+            <RadioGroup
+              label="Long break length"
+              options={LONG_BREAK_OPTIONS}
+              value={longBreakMinutes}
+              onChange={setLongBreakMinutes}
+            />
+            {buttonRow(
+              <button onClick={() => setAddRoundsModalOpen(false)} className={secondaryButton}>
+                Cancel
+              </button>,
+              <button onClick={confirmAddRounds} className={primaryButton} style={primaryShadow}>
+                {addRoundsAmount === null
+                  ? "Continue without a limit"
+                  : addRoundsAmount === 1
+                  ? "Add 1 round"
+                  : `Add ${addRoundsAmount} rounds`}
+              </button>
+            )}
+          </Dialog>
         )}
-        </div>
+        </main>
         <Credit inert={addRoundsModalOpen} />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen w-full flex flex-col bg-white">
-        {syncNotice}
+    <div className="min-h-screen w-full flex flex-col bg-page" style={modeVars}>
+      {announcer}
+      {syncNotice}
       <div className="flex-1 w-full flex items-start justify-center p-6 pt-16">
       {!setupComplete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-6"
-          style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+        <Dialog
+          title="Automatic Pomodoro Focus Timer"
+          description={
+            <>
+              Start once: 25&#8209;minute focus rounds and 5&#8209;minute breaks switch automatically, each
+              one is logged and ends with a sound alert. Every 4th round gets an optional longer break.
+            </>
+          }
+          enterHint="Press Enter to start with these settings."
+          onSubmit={startSession}
         >
-          <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
-            <div className="w-full text-left">
-              <div className="text-xl font-bold text-neutral-800">Automatic Pomodoro Focus Timer</div>
-              <div className="text-sm text-neutral-400 mt-3">
-                Start once: 25&#8209;minute focus rounds and 5&#8209;minute breaks switch automatically, each
-                one is logged and ends with a sound alert. Every 4th round gets an optional longer break.
-              </div>
-            </div>
-
-            <div className="w-full flex flex-col items-start gap-2">
-              <div className="text-sm font-medium text-neutral-600">Number of rounds</div>
-              <div className="flex items-stretch rounded-xl border border-neutral-200">
-                <button
-                  onClick={() => setRoundsLimit((r) => (r === null ? null : r === 1 ? null : r - 1))}
-                  disabled={roundsLimit === null}
-                  className="w-11 h-11 flex items-center justify-center rounded-l-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
-                >
-                  <MinusIcon size={20} />
-                </button>
-                <span className="w-24 flex items-center justify-center border-x border-neutral-200">
-                  <span className="flex items-baseline gap-1.5 tabular-nums">
-                    <span className="text-xl font-bold text-neutral-800 leading-none">{roundsLimit === null ? "∞" : roundsLimit}</span>
-                    {roundsLimit !== null && (
-                      <span className="text-sm text-neutral-800 leading-none">{roundsLimit === 1 ? "round" : "rounds"}</span>
-                    )}
-                  </span>
-                </span>
-                <button
-                  onClick={() => setRoundsLimit((r) => (r === null ? 1 : Math.min(16, r + 1)))}
-                  disabled={roundsLimit === 16}
-                  className="w-11 h-11 flex items-center justify-center rounded-r-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-100"
-                >
-                  <PlusIcon size={20} />
-                </button>
-              </div>
-            </div>
-
-            <RadioGroup
-              label="Long break length"
-              options={LONG_BREAK_OPTIONS}
-              value={longBreakMinutes}
-              onChange={setLongBreakMinutes}
-              pillClassName="px-4 py-3 rounded-xl text-sm font-medium whitespace-nowrap"
-            />
-
-            <button
-              onClick={startSession}
-              className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
-              style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
-            >
-              Start
-            </button>
-          </div>
-        </div>
+          <RoundsStepper label="Number of rounds" value={roundsLimit} onChange={setRoundsLimit} />
+          <RadioGroup
+            label="Long break length"
+            options={LONG_BREAK_OPTIONS}
+            value={longBreakMinutes}
+            onChange={setLongBreakMinutes}
+          />
+          <button onClick={startSession} className={primaryButton} style={primaryShadow}>
+            Start
+          </button>
+        </Dialog>
       )}
 
       {setupComplete && endSessionModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-6"
-          style={{ backgroundColor: "rgba(255,255,255,0.6)" }}
+        <Dialog
+          title="Are you sure you want to end the session?"
+          description="The timer will stop for everyone. The session log will only stay on the summary screen until someone sets up a new session."
+          onClose={() => setEndSessionModalOpen(false)}
         >
-          <div className="w-full max-w-sm bg-white rounded-2xl border border-neutral-200 shadow-xl p-6 flex flex-col items-center gap-6">
-            <div className="w-full text-left">
-              <div className="text-xl font-bold text-neutral-800">Are you sure you want to end the session?</div>
-              <div className="text-sm text-neutral-400 mt-3">
-                The timer will stop for everyone. The session log will only stay on the summary screen until
-                someone sets up a new session.
-              </div>
-            </div>
-            <div className="w-full flex flex-col items-center gap-1">
-              {/* keeping the session going is the safe choice, so Cancel is the primary button */}
-              <button
-                onClick={() => setEndSessionModalOpen(false)}
-                className="w-full px-6 py-3 rounded-full text-white font-medium bg-violet-600 hover:bg-violet-700"
-                style={{ boxShadow: "0 2px 8px -2px #7c3aed59" }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={endSession}
-                className="w-full flex items-center justify-center rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700"
-                style={{ height: "44px" }}
-              >
-                Yes, end session
-              </button>
-            </div>
-          </div>
-        </div>
+          {/* keeping the session going is the safe choice, so Cancel is the primary button */}
+          {buttonRow(
+            <button onClick={endSession} className={secondaryButton}>
+              Yes, end session
+            </button>,
+            <button onClick={() => setEndSessionModalOpen(false)} className={primaryButton} style={primaryShadow}>
+              Cancel
+            </button>
+          )}
+        </Dialog>
       )}
 
-      <div inert={!setupComplete || endSessionModalOpen ? "" : undefined} className="w-full max-w-sm flex flex-col items-center">
-        <div className="text-xl font-bold tracking-wide uppercase" style={{ color }}>
+      <main inert={!setupComplete || endSessionModalOpen ? "" : undefined} className="w-full max-w-sm flex flex-col items-center">
+        <h1 className="sr-only">Violet Tomato – Automatic Pomodoro Focus Timer</h1>
+        <h2 className="type-mode-label uppercase text-mode">
           {MODES[mode].label}
-        </div>
+        </h2>
 
-        <div className={`relative w-72 h-72 ${isTransitioning ? "animate-pulse" : ""}`} style={{ marginTop: "24px" }}>
-          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280">
+        <div className={`relative w-72 h-72 mt-6 ${isTransitioning ? "animate-pulse" : ""}`}>
+          <svg className="w-full h-full -rotate-90" viewBox="0 0 280 280" aria-hidden="true" focusable="false">
             <defs>
               <radialGradient id="ring-tip-shadow">
                 <stop offset="0%" stopColor={shadowColor} stopOpacity="0.25" />
@@ -1114,7 +1252,7 @@ function PomodoroTimer() {
                 />
               </clipPath>
             </defs>
-            <circle cx="140" cy="140" r={radius} fill="none" stroke="#EBECF0" strokeWidth="10" />
+            <circle cx="140" cy="140" r={radius} fill="none" className="stroke-ring-track" strokeWidth="10" />
             <circle
               cx="140" cy="140" r={radius} fill="none" stroke={arcColor} strokeWidth="10"
               strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dashoffset}
@@ -1140,30 +1278,22 @@ function PomodoroTimer() {
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             {isTransitioning ? (
               <>
-                <div style={{ fontSize: "30px", lineHeight: "34px" }}>{mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"}</div>
-                <div className="text-sm text-neutral-400 mt-1">
-                  {mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete"}
-                </div>
+                <div className="type-emoji leading-[2.125rem]" aria-hidden="true">{mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"}</div>
+                <div className="type-body text-secondary mt-1">{completeText}</div>
               </>
             ) : (
               <>
-                <div
-                  className="flex items-center justify-center gap-1"
-                  style={{ height: "30px", marginBottom: "12px" }}
-                >
+                <div className="flex items-center justify-center gap-1 h-[1.875rem] mb-3" aria-hidden="true">
                   {Array.isArray(MODES[mode].emoji) ? (
                     MODES[mode].emoji.map((e, i) => (
-                      <span key={i} style={{ fontSize: "30px", lineHeight: "30px" }}>{e}</span>
+                      <span key={i} className="type-emoji">{e}</span>
                     ))
                   ) : (
-                    <span style={{ fontSize: "30px", lineHeight: "30px" }}>{MODES[mode].emoji}</span>
+                    <span className="type-emoji">{MODES[mode].emoji}</span>
                   )}
                 </div>
-                <div className="text-5xl font-bold tabular-nums text-neutral-800">{formatTime(secondsLeft)}</div>
-                <div
-                  className="flex items-center justify-center text-sm text-neutral-400"
-                  style={{ height: "30px", marginTop: "12px" }}
-                >
+                <div className="type-display tabular-nums text-primary">{formatTime(secondsLeft)}</div>
+                <div className="flex items-center justify-center type-body text-secondary h-[1.875rem] mt-3">
                   {mode === "work" ? centerLabel : ""}
                 </div>
               </>
@@ -1171,12 +1301,14 @@ function PomodoroTimer() {
           </div>
         </div>
 
-        <div className="flex items-center gap-5" style={{ marginTop: "24px" }}>
+        {/* aria-disabled instead of disabled during the transition, so a button keeps keyboard
+            focus while it's briefly unavailable (the reducer ignores the press anyway) */}
+        <div className="flex items-center gap-5 mt-6">
           <button
-            onClick={handleReset}
-            disabled={isTransitioning}
-            className="flex items-center justify-center rounded-full bg-neutral-200 text-neutral-600 hover:bg-neutral-300 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ height: "44px", width: "44px" }}
+            onClick={() => !isTransitioning && handleReset()}
+            aria-disabled={isTransitioning || undefined}
+            className="flex items-center justify-center rounded-full bg-button-secondary text-button-secondary hover:text-button-secondary-hover hover:bg-button-secondary-hover aria-disabled:opacity-40 aria-disabled:cursor-not-allowed h-11 w-11"
+            aria-label="Reset current round"
             title="Reset current round"
           >
             <RotateCcwIcon size={20} />
@@ -1192,98 +1324,84 @@ function PomodoroTimer() {
             const looksActive = buttonLabel === "Pause";
             return (
               <button
-                onClick={handleToggle}
-                disabled={isTransitioning}
+                ref={playPauseRef}
+                onClick={() => !isTransitioning && handleToggle()}
+                aria-disabled={isTransitioning || undefined}
                 aria-label={buttonLabel}
                 title={buttonLabel}
-                className={`flex items-center justify-center rounded-full disabled:opacity-40 disabled:cursor-not-allowed ${
-                  looksActive ? "bg-neutral-200 text-neutral-600 hover:bg-neutral-300" : "text-white"
+                className={`flex items-center justify-center h-14 w-14 rounded-full aria-disabled:opacity-40 aria-disabled:cursor-not-allowed ${
+                  looksActive ? "bg-button-secondary text-button-secondary hover:text-button-secondary-hover hover:bg-button-secondary-hover" : "bg-button-mode hover:bg-button-mode-hover text-button-primary"
                 }`}
-                style={{
-                  height: "56px",
-                  width: "56px",
-                  ...(looksActive ? {} : { backgroundColor: color, boxShadow: `0 2px 8px -2px ${shadowColor}59` }),
-                }}
+                style={looksActive ? undefined : { boxShadow: `0 2px 8px -2px ${shadowColor}59` }}
               >
                 {looksActive ? <PauseIcon size={20} /> : <PlayIcon size={20} />}
               </button>
             );
           })()}
           <button
-            onClick={handleSkip}
-            disabled={isTransitioning}
-            className="flex items-center justify-center rounded-full bg-neutral-200 text-neutral-600 hover:bg-neutral-300 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ height: "44px", width: "44px" }}
+            onClick={() => !isTransitioning && handleSkip()}
+            aria-disabled={isTransitioning || undefined}
+            className="flex items-center justify-center rounded-full bg-button-secondary text-button-secondary hover:text-button-secondary-hover hover:bg-button-secondary-hover aria-disabled:opacity-40 aria-disabled:cursor-not-allowed h-11 w-11"
+            aria-label="Skip"
             title="Skip"
           >
             <SkipForwardIcon size={20} />
           </button>
         </div>
 
-        <div className="flex flex-col items-center" style={{ marginTop: "24px", gap: "4px" }}>
-          {mode === "longBreak" ? (
-            <>
+        {/* The first button is the same element in every mode (only its text and action change),
+            so keyboard focus stays on it when pressing it switches the mode. */}
+        <div className="flex flex-col items-center mt-6 gap-1">
+          <button
+            onClick={() => !isTransitioning && (mode === "longBreak" ? switchToShortBreak() : startLongBreak())}
+            aria-disabled={isTransitioning || undefined}
+            className={tertiaryButton}
+          >
+            {mode === "longBreak" ? "Switch to 5 min break" : mode === "break" ? "Switch to long break" : "Start long break"}
+          </button>
+          {mode === "longBreak" && (
             <button
-              onClick={switchToShortBreak}
-              disabled={isTransitioning}
-              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ height: "44px" }}
-            >
-              Switch to 5 min break
-            </button>
-            <button
-              onClick={addFiveMinutes}
-              disabled={isTransitioning}
-              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ height: "44px" }}
+              onClick={() => !isTransitioning && addFiveMinutes()}
+              aria-disabled={isTransitioning || undefined}
+              className={tertiaryButton}
             >
               Add another 5 min
             </button>
-            </>
-          ) : (
-            <button
-              onClick={() => startLongBreak()}
-              disabled={isTransitioning}
-              className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ height: "44px" }}
-            >
-              {mode === "break" ? "Switch to long break" : "Start long break"}
-            </button>
           )}
           <button
-            onClick={() => setEndSessionModalOpen(true)}
-            disabled={isTransitioning}
-            className="flex items-center justify-center px-4 rounded-full text-sm font-medium text-neutral-500 hover:text-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ height: "44px" }}
+            onClick={() => !isTransitioning && setEndSessionModalOpen(true)}
+            aria-disabled={isTransitioning || undefined}
+            className={tertiaryButton}
           >
             End session
           </button>
         </div>
 
-        <div className="w-full flex flex-col items-center gap-1" style={{ marginTop: "24px" }}>
+        <div className="w-full flex flex-col items-center gap-1 mt-6">
           <button
             onClick={() => setLogOpen((o) => !o)}
-            className="flex items-center"
-            style={{ minHeight: "44px" }}
+            aria-expanded={history.length > 0 ? logOpen : undefined}
+            aria-controls={history.length > 0 ? "session-log" : undefined}
+            className="flex items-center min-h-11 text-button-tertiary hover:text-button-tertiary-hover"
           >
             <span className="flex items-baseline gap-1.5">
-              <span className="text-xl font-bold text-neutral-900 leading-none">{completedCycles}</span>
-              <span className="text-sm text-neutral-900 leading-none">completed</span>
+              <span className="type-heading text-primary">{completedCycles}</span>
+              <span className="type-body text-primary">completed</span>
               {completedCycles > 0 && (
                 <span className="self-end py-px">
                   {logOpen ? (
-                    <ChevronUpIcon size={16} style={{ color: "#808080" }} />
+                    <ChevronUpIcon size={16} />
                   ) : (
-                    <ChevronDownIcon size={16} style={{ color: "#808080" }} />
+                    <ChevronDownIcon size={16} />
                   )}
                 </span>
               )}
             </span>
           </button>
 
-          {logOpen && history.length > 0 && <HistoryLog history={history} />}
+          {logOpen && history.length > 0 && <div id="session-log"><HistoryLog history={history} /></div>}
         </div>
-      </div>
+      </main>
       </div>
       <Credit inert={!setupComplete || endSessionModalOpen} />
     </div>
