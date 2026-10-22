@@ -768,8 +768,7 @@ function reduce(s, action, now) {
         sessionComplete: true,
         endedEarly: true,
         roundsLimit: completedCycles, // so "Add more rounds" adds on top of what was actually done
-        completionHeading:
-          completedCycles > 0 ? COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)] : "Session ended",
+        completionHeading: COMPLETION_HEADINGS[Math.floor(Math.random() * COMPLETION_HEADINGS.length)],
       };
     }
     case "newSession":
@@ -1037,10 +1036,10 @@ function PomodoroTimer() {
   }, [sessionComplete]);
 
   const completeText = mode === "work" ? "Focus round complete" : mode === "break" ? "Break complete" : "Long break complete";
+  // A finished session always has at least one round: the first focus round counts once it ends,
+  // by the timer, Skip or End session.
   const roundsText =
-    completedCycles === 0
-      ? "No rounds completed"
-      : completedCycles === 1
+    completedCycles === 1
       ? "You completed 1 round"
       : `You completed ${endedEarly ? "" : "all "}${completedCycles} rounds`;
 
@@ -1136,7 +1135,7 @@ function PomodoroTimer() {
     const k = Math.min((viewport.width * 0.92) / 288, (viewport.height * 0.92) / (20 + 24 + 288));
     const px = (n) => n * k;
     const emoji = sessionComplete
-      ? [completedCycles > 0 ? "🎉" : "👋"]
+      ? ["🎉"]
       : isTransitioning
       ? [mode === "work" ? "💪" : mode === "break" ? "🙌" : "🔋"]
       : [].concat(MODES[mode].emoji);
@@ -1224,7 +1223,7 @@ function PomodoroTimer() {
         <main className="flex-1 w-full flex items-center justify-center p-6">
         <h1 className="sr-only">Violet Tomato – Automatic Pomodoro Focus Timer</h1>
         <div inert={addRoundsModalOpen ? "" : undefined} className="w-full max-w-xs bg-page rounded-2xl border border-subtle p-6 flex flex-col items-center text-center">
-          <div className="type-emoji leading-normal" aria-hidden="true">{completedCycles > 0 ? "🎉" : "👋"}</div>
+          <div className="type-emoji leading-normal" aria-hidden="true">🎉</div>
           <div className="w-full flex flex-col items-center mt-5">
             <h2 ref={completionHeadingRef} tabIndex={-1} className="type-heading text-primary focus:outline-none">{completionHeading}</h2>
             <button
@@ -1248,27 +1247,12 @@ function PomodoroTimer() {
               </div>
             )}
           </div>
-          {/* with no rounds done there's nothing to add to — starting afresh is the obvious next
-              step, so it becomes the primary button */}
-          {completedCycles === 0 ? (
-            <>
-              <button onClick={newSession} className={`${primaryButton} mt-3`} style={primaryShadow}>
-                Set up new session
-              </button>
-              <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
-                Add more rounds
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
-                Add more rounds
-              </button>
-              <button onClick={newSession} className={`${tertiaryButton} w-full`}>
-                Set up new session
-              </button>
-            </>
-          )}
+          <button onClick={openAddRounds} className={`${tertiaryButton} w-full mt-1`}>
+            Add more rounds
+          </button>
+          <button onClick={newSession} className={`${tertiaryButton} w-full`}>
+            Set up new session
+          </button>
         </div>
 
         {addRoundsModalOpen && (
