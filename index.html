@@ -702,9 +702,11 @@ function reduce(s, action, now) {
     case "endSession": {
       // Stops the session where it is and shows the summary. Nothing is erased yet: from the
       // summary the group can still add rounds and carry on. The segment it was ended in goes into
-      // the log, from when it started to now; it doesn't count as a completed round.
+      // the log, from when it started to now, if the timer ran in it; it doesn't count as a
+      // completed round.
       if (!s.setupComplete || s.sessionComplete || s.isTransitioning) return s;
-      const started = s.segmentStart != null && now > s.segmentStart;
+      // only if the timer actually ran in it (a segment stopped at its full length isn't logged)
+      const started = s.segmentStart != null && remainingSeconds(s, now) < s.segmentTotal;
       const entry = started && {
         type: s.mode === "work" ? "focus" : s.mode === "longBreak" ? "longBreak" : "break",
         round: s.mode === "work" ? s.completedCycles + 1 : s.completedCycles,
@@ -1224,23 +1226,28 @@ function PomodoroTimer() {
       {setupComplete && endSessionModalOpen && (
         <Dialog
           title="End session"
-          description="The timer will stop for everyone. This can't be undone."
+          description="Are you sure you want to end the session? This will stop the timer for everyone and can't be undone."
           onClose={() => setEndSessionModalOpen(false)}
         >
           {/* Keeping the session going is the safe choice, so Cancel is the primary button and
-              comes first: on the left, or on top once the two don't fit on one line. flex-1 makes
-              them equal width; min-w-max wraps the second one instead of squeezing its text. */}
+              comes first. While both fit on one line (a row of 18.5rem or more) each is as wide as
+              its text; narrower, they stack at full width with Cancel on top. The basis is huge and
+              positive below the threshold (one button per line, capped at full width) and negative,
+              so ignored, above it. */}
           <div className="w-full flex flex-wrap gap-2">
-            <div className="flex-1 min-w-max">
-              <button onClick={() => setEndSessionModalOpen(false)} className={primaryButton} style={primaryShadow}>
-                Cancel
-              </button>
-            </div>
-            <div className="flex-1 min-w-max">
-              <button onClick={endSession} className={secondaryButton}>
-                Yes, end session
-              </button>
-            </div>
+            <button
+              onClick={() => setEndSessionModalOpen(false)}
+              className={`${primaryButton.replace("w-full ", "")} max-w-full basis-[calc((18.5rem_-_100%)*999)]`}
+              style={primaryShadow}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={endSession}
+              className={`${secondaryButton.replace("w-full ", "")} max-w-full basis-[calc((18.5rem_-_100%)*999)]`}
+            >
+              Yes, end session
+            </button>
           </div>
         </Dialog>
       )}
