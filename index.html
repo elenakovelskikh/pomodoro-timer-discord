@@ -65,47 +65,61 @@ async function loadScript(src, attempts = 3) {
 
 // Which room to sync with: the Activity instance inside Discord, ?room=<name> in a plain browser
 // (to test syncing between tabs), or null for a standalone timer. Settled once, before the timer
-// component mounts. Inside Discord a failed SDK start is reported as an error with reason "discord",
-// since the room is unknown then.
+// component mounts.
+//
+// Inside Discord the room is the instance id, which Discord puts in the page's address
+// (instance_id=…), so it's known right away. The Discord SDK starts in the background and isn't
+// waited for: SDK 2.5.0 throws while reading the start-up message from newer Discord clients
+// (a user with no avatar comes as null where it expects a string), so its ready() never settles
+// there, and waiting for it left the timer stuck on "Connecting…". Only if the address has no
+// instance id is the SDK waited for; failing that is reported with reason "discord".
 async function findRoom() {
   const params = new URLSearchParams(location.search);
   if (!params.has("frame_id")) return params.get("room");
-  try {
+
+  // Discord's proxy blocks direct requests to Firebase, so route its WebSocket through the URL
+  // Mapping /rtdb → <database host> set in the Developer Portal. Firebase also hands clients a
+  // per-shard hostname to reconnect to; those all go to the same mapping, since the main host
+  // accepts connections itself (the ns= query parameter names the database). Must run before
+  // the Firebase script loads, since it grabs the WebSocket constructor at load time.
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = class extends NativeWebSocket {
+    constructor(url, protocols) {
+      const u = new URL(url);
+      if (u.hostname.endsWith(".firebasedatabase.app")) {
+        u.host = location.host;
+        u.pathname = "/.proxy/rtdb" + u.pathname;
+        if (!u.searchParams.has("ns")) u.searchParams.set("ns", new URL(FIREBASE_CONFIG.databaseURL).hostname.split(".")[0]);
+      }
+      super(u, protocols);
+    }
+  };
+
+  const sdkStarted = (async () => {
     const { DiscordSDK } = await import("./vendor/discord-embedded-app-sdk-2.5.0.mjs");
     const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
     await discordSdk.ready(); // tells Discord to hide its loading screen
     window.discordSdk = discordSdk;
-
-    // Discord's proxy blocks direct requests to Firebase, so route its WebSocket through the URL
-    // Mapping /rtdb → <database host> set in the Developer Portal. Firebase also hands clients a
-    // per-shard hostname to reconnect to; those all go to the same mapping, since the main host
-    // accepts connections itself (the ns= query parameter names the database). Must run before
-    // the Firebase script loads, since it grabs the WebSocket constructor at load time.
-    const NativeWebSocket = window.WebSocket;
-    window.WebSocket = class extends NativeWebSocket {
-      constructor(url, protocols) {
-        const u = new URL(url);
-        if (u.hostname.endsWith(".firebasedatabase.app")) {
-          u.host = location.host;
-          u.pathname = "/.proxy/rtdb" + u.pathname;
-          if (!u.searchParams.has("ns")) u.searchParams.set("ns", new URL(FIREBASE_CONFIG.databaseURL).hostname.split(".")[0]);
-        }
-        super(u, protocols);
-      }
-    };
-
-    // Plain target="_blank" links don't open from inside the Activity iframe; route them through Discord
-    document.addEventListener("click", (e) => {
-      const link = e.target.closest("a[href^='http']");
-      if (!link) return;
-      e.preventDefault();
-      discordSdk.commands.openExternalLink({ url: link.href });
-    });
-    return discordSdk.instanceId;
-  } catch (err) {
+    return discordSdk;
+  })().catch((err) => {
     console.error("Discord SDK init failed:", err);
-    throw Object.assign(err, { reason: "discord" });
-  }
+    return null;
+  });
+
+  // Plain target="_blank" links don't open from inside the Activity iframe; route them through
+  // Discord once its SDK is up
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest("a[href^='http']");
+    if (!link || !window.discordSdk) return;
+    e.preventDefault();
+    window.discordSdk.commands.openExternalLink({ url: link.href });
+  });
+
+  const instanceId = params.get("instance_id");
+  if (instanceId) return instanceId;
+  const discordSdk = await sdkStarted;
+  if (!discordSdk) throw Object.assign(new Error("Discord SDK didn't start"), { reason: "discord" });
+  return discordSdk.instanceId;
 }
 
 let db = null;
