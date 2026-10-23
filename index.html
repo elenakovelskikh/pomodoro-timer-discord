@@ -655,7 +655,7 @@ function beginTransition(s, now, label, next) {
     isRunning: false,
     isTransitioning: true,
     pauseStartedAt: s.pauseStartedAt ?? now, // freeze the countdown where it stopped
-    next: { ...next, at: now + SOUND_DURATION_MS[soundKind] },
+    next: { ...next, endedAt: now, at: now + SOUND_DURATION_MS[soundKind] },
   };
 }
 
@@ -703,10 +703,16 @@ function reduce(s, action, now) {
       const minutes = s.mode === "longBreak" ? s.longBreakMinutes ?? LONG_BREAK_MIN : MODES[s.mode].minutes;
       return { ...s, ...freshSegment(s.mode, minutes * 60, now) };
     }
-    case "autoComplete":
-      // automatic: timer hit zero
+    case "autoComplete": {
+      // automatic: timer hit zero. The segment ends when it was due, not when someone's page
+      // noticed: with every participant's Activity closed or in the background, nobody's timer
+      // runs, and the first one back may notice minutes late. Ending (and logging) it at the due
+      // time, and starting the next one on schedule after it, keeps the session on the clock; a
+      // whole stretch missed while everyone was away is caught up segment by segment.
       if (!s.isRunning || s.isTransitioning || remainingSeconds(s, now) > 0) return s;
-      return completeSegment(s, now, "Pause");
+      const dueAt = s.segmentStart + s.pausedMs + s.segmentTotal * 1000;
+      return completeSegment(s, Math.min(dueAt, now), "Pause");
+    }
     case "skip":
       // reuse the same sound + transition-delay flow as auto-complete, so it's easy to test
       if (s.isTransitioning) return s;
@@ -782,7 +788,8 @@ function reduce(s, action, now) {
       if (s.next.complete) {
         return { ...s, isTransitioning: false, next: null, completionHeading: s.next.heading, sessionComplete: true };
       }
-      return { ...s, isTransitioning: false, next: null, ...freshSegment(s.next.mode, s.next.total, now) };
+      // on schedule: right after the sound, even if this runs late (see autoComplete)
+      return { ...s, isTransitioning: false, next: null, ...freshSegment(s.next.mode, s.next.total, Math.min(s.next.at, now)) };
     default:
       return s;
   }
@@ -974,10 +981,14 @@ function PomodoroTimer() {
   }, [isTransitioning, nextAt, dispatch]);
 
   // The sound plays on each participant's own device, whenever a segment ends — whoever caused it.
-  // During a transition `mode` is still the segment that just ended.
+  // During a transition `mode` is still the segment that just ended. Segments that ended more than
+  // a minute and a half ago (caught up after everyone was away) end silently, so coming back doesn't
+  // set off a string of sounds; a page in the background, checking the time about once a minute,
+  // still plays its sound.
   const wasTransitioningRef = useRef(false);
   useEffect(() => {
-    if (isTransitioning && !wasTransitioningRef.current) playSound(mode === "work" ? "workEnd" : "breakEnd");
+    const recent = state.next?.endedAt == null || now() - state.next.endedAt < 90000;
+    if (isTransitioning && !wasTransitioningRef.current && recent) playSound(mode === "work" ? "workEnd" : "breakEnd");
     wasTransitioningRef.current = isTransitioning;
   }, [isTransitioning]);
 
