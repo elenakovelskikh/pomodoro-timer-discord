@@ -69,10 +69,13 @@ async function loadScript(src, attempts = 3) {
 //
 // Inside Discord the room is the instance id, which Discord puts in the page's address
 // (instance_id=…), so it's known right away. The Discord SDK starts in the background and isn't
-// waited for: SDK 2.5.0 throws while reading the start-up message from newer Discord clients
-// (a user with no avatar comes as null where it expects a string), so its ready() never settles
-// there, and waiting for it left the timer stuck on "Connecting…". Only if the address has no
-// instance id is the SDK waited for; failing that is reported with reason "discord".
+// waited for: SDK 2.5.0 throws while reading the start-up READY message from newer Discord clients
+// (a user with no avatar comes as null where its schema expects a string), so its ready() never
+// settled there and waiting for it left the timer stuck on "Connecting…". The vendored copy is
+// patched for that (READY's user.avatar also accepts null, as the SDK's other user schemas do;
+// re-apply when updating the SDK unless Discord fixed it), and not waiting for it keeps the timer
+// working if something like it happens again. Only if the address has no instance id is the SDK
+// waited for; failing that is reported with reason "discord".
 async function findRoom() {
   const params = new URLSearchParams(location.search);
   if (!params.has("frame_id")) return params.get("room");
@@ -1009,9 +1012,10 @@ function PomodoroTimer() {
   // Screen Wake Lock: keeps the screen from auto-dimming/locking while a round is running and
   // the tab is in view. Released automatically by the browser once the tab is hidden, and
   // there's no API to keep a background tab's screen awake or to override the phone's own
-  // lock button — so this only helps while the timer is actually on screen.
+  // lock button — so this only helps while the timer is actually on screen. Not inside Discord:
+  // its Activity frame doesn't allow wake locks, and asking only logs a policy violation.
   useEffect(() => {
-    if (!("wakeLock" in navigator)) return;
+    if (!("wakeLock" in navigator) || new URLSearchParams(location.search).has("frame_id")) return;
     let wakeLock = null;
     async function acquire() {
       try {
